@@ -1,0 +1,21 @@
+services:
+  zentcontainer:
+    image: ghcr.io/zentworks/zentcontainer:latest
+    container_name: zentcontainer
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "9443:9443"
+      - "9444:9444"
+    environment:
+      ZC_DATA_DIR: ${ZC_DATA_DIR:-/opt/zentcontainer}
+      ZC_COOKIE_SECURE: ${ZC_COOKIE_SECURE:-false}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host-proc:ro
+      - /etc/hostname:/host-hostname:ro
+      - /etc/os-release:/host-os-release:ro
+      - ${ZC_DATA_DIR:-/opt/zentcontainer}:${ZC_DATA_DIR:-/opt/zentcontainer}

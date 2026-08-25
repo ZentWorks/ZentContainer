@@ -1,0 +1,390 @@
+openapi: 3.1.0
+info:
+  title: ZentContainer API
+  version: 0.6.27
+  description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+paths:
+  /openapi:
+    get: {summary: Download this bundled OpenAPI document, security: [], responses: {'200': {description: OpenAPI YAML}}}
+  /system:
+    get: {summary: Get system status, responses: {'200': {description: OK}}}
+  /settings:
+    get: {summary: Get runtime update settings, responses: {'200': {description: OK}}}
+    put: {summary: Update runtime update settings, responses: {'200': {description: OK}}}
+  /account/password:
+    put: {summary: Change the interactive Controller administrator password and revoke other browser sessions, responses: {'200': {description: Changed}, '403': {description: Interactive administrator session/current password required}}}
+  /account/language:
+    put:
+      summary: Persist the interactive user's WebUI language (de or en)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [language]
+              properties:
+                language: {type: string, enum: [de, en]}
+      responses: {'200': {description: Language preference saved}, '403': {description: Interactive browser session required}}
+  /dashboard:
+    get:
+      summary: Get dashboard, cached Docker storage usage and update status
+      responses:
+        '200':
+          description: Dashboard snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  storage: {$ref: '#/components/schemas/DockerStorageSummary'}
+  /host-metrics:
+    get: {summary: Get host CPU, memory, load, uptime and network traffic metrics, responses: {'200': {description: OK}}}
+  /hosts:
+    get: {summary: List local and paired remote hosts, responses: {'200': {description: OK}}}
+  /hosts/pair:
+    post: {summary: Pair an Agent using its one-time pairing code, responses: {'201': {description: Paired}}}
+  /hosts/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    delete: {summary: Unpair/remove a remote Agent, responses: {'200': {description: OK}}}
+  /hosts/{host}/proxy/{path}:
+    parameters:
+      - {name: host, in: path, required: true, schema: {type: string}}
+      - {name: path, in: path, required: true, schema: {type: string}}
+    get: {summary: Run an authorized GET resource operation on a paired Agent, responses: {'200': {description: Proxied response}}}
+    post: {summary: Run an authorized POST resource operation on a paired Agent, responses: {'200': {description: Proxied response}}}
+    put: {summary: Run an authorized PUT resource operation on a paired Agent, responses: {'200': {description: Proxied response}}}
+    delete: {summary: Run an authorized DELETE resource operation on a paired Agent, responses: {'200': {description: Proxied response}}}
+  /groups:
+    get: {summary: List container groups and their host/container members, responses: {'200': {description: OK}}}
+    post:
+      summary: Create a container group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContainerGroupInput'}
+      responses: {'201': {description: Created}}
+  /groups/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get: {summary: Get one container group, responses: {'200': {description: OK}}}
+    put:
+      summary: Replace a container group's name and members
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContainerGroupInput'}
+      responses: {'200': {description: Updated}}
+    delete: {summary: Delete a container group, responses: {'200': {description: Deleted}}}
+  /groups/{id}/{action}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+      - {name: action, in: path, required: true, schema: {type: string, enum: [start, stop, restart]}}
+    post: {summary: Start, stop or restart every member of a container group across its hosts, responses: {'200': {description: Per-member action results}}}
+  /containers:
+    get: {summary: List containers, responses: {'200': {description: OK}}}
+    post: {summary: Create and start a standalone container, responses: {'201': {description: Created}}}
+  /containers/stats:
+    get:
+      summary: Get lightweight CPU/RAM stats for all running containers on this host
+      description: Uses one bounded per-host batch sample. Results are briefly cached/coalesced so the WebUI can refresh every five seconds without one browser request per container.
+      responses:
+        '200':
+          description: Batch container stats
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ContainerStatsBatch'}
+  /containers/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Inspect a container including any pending ZentContainer edit, responses: {'200': {description: OK}}}
+    put:
+      summary: Validate and apply or defer new settings for a ZentContainer-managed standalone container
+      parameters:
+        - {name: apply, in: query, required: false, schema: {type: string, enum: [now, later], default: now}, description: Apply by safe recreate now or store until the next ZentContainer Start/Restart}
+      responses: {'200': {description: Updated or queued}}
+    delete:
+      summary: Delete a container and optionally remove now-unused named volumes, image and custom networks
+      parameters:
+        - {name: force, in: query, required: false, schema: {type: boolean, default: false}}
+        - {name: remove_volumes, in: query, required: false, schema: {type: boolean, default: false}, description: Enables selected volume removals and requires volumes.write}
+        - {name: volume, in: query, required: false, schema: {type: array, items: {type: string}}, style: form, explode: true, description: Named volume(s) selected from the delete plan}
+        - {name: remove_image, in: query, required: false, schema: {type: boolean, default: false}, description: Remove the image when no other container uses it; requires images.delete}
+        - {name: remove_networks, in: query, required: false, schema: {type: boolean, default: false}, description: Enables selected custom-network removals and requires networks.write}
+        - {name: network, in: query, required: false, schema: {type: array, items: {type: string}}, style: form, explode: true, description: Custom network ID(s) selected from the delete plan}
+      responses:
+        '200': {description: Container deleted; response includes deleted resources and any post-delete warnings}
+        '409': {description: A selected resource became shared/in-use before deletion}
+  /containers/{id}/delete-plan:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Preview mounted named volumes, image and custom networks and whether each can safely be deleted with the container, responses: {'200': {description: OK}}}
+  /containers/{id}/adopt:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post: {summary: Preview or record safe adoption of an external standalone container, responses: {'200': {description: OK}}}
+  /containers/{id}/{action}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: action, in: path, required: true, schema: {type: string, description: start|stop|restart|pause|unpause|kill|update-check|update|rollback}}
+    post: {summary: Run a container action, responses: {'200': {description: OK}}}
+  /containers/{id}/logs:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read container logs, responses: {'200': {description: OK}}}
+  /containers/{id}/stats:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read one-shot container stats, responses: {'200': {description: OK}}}
+  /containers/{id}/terminal:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Upgrade to the interactive container terminal WebSocket, responses: {'101': {description: Switching Protocols}}}
+  /images:
+    get: {summary: List images including container usage, responses: {'200': {description: OK}}}
+  /images/pull:
+    post: {summary: Pull an image, responses: {'200': {description: OK}}}
+  /images/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Inspect image, responses: {'200': {description: OK}}}
+    delete: {summary: Remove an unused image, responses: {'200': {description: OK}}}
+  /volumes:
+    get: {summary: List volumes including container usage, responses: {'200': {description: OK}}}
+    post: {summary: Create a volume, responses: {'201': {description: Created}}}
+  /volumes/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Inspect volume, responses: {'200': {description: OK}}}
+    delete: {summary: Remove an unused volume, responses: {'200': {description: OK}}}
+  /volumes/{name}/size:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Calculate real used bytes in a named volume, responses: {'200': {description: OK}}}
+  /volumes/{name}/files:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: List a directory inside a named volume, responses: {'200': {description: OK}}}
+  /volumes/{name}/file:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download/read a file from a named volume, responses: {'200': {description: File}}}
+    put: {summary: Write editable text content into a named volume, responses: {'200': {description: Updated}}}
+    delete: {summary: Delete a selected file or directory inside a named volume, responses: {'200': {description: Deleted}}}
+  /volumes/{name}/mkdir:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Create a directory inside a named volume, responses: {'201': {description: Created}}}
+  /volumes/{name}/upload:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Upload a file into a named volume, responses: {'201': {description: Created}}}
+  /volumes/{name}/archive:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download a volume path as tar.gz, responses: {'200': {description: Archive}}}
+  /networks:
+    get: {summary: List networks, responses: {'200': {description: OK}}}
+    post: {summary: Create a Docker network, responses: {'201': {description: Created}}}
+  /networks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Inspect a network, responses: {'200': {description: OK}}}
+    delete: {summary: Delete a non-built-in Docker network, responses: {'200': {description: OK}}}
+  /networks/{id}/connect:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post: {summary: Connect a container to a network, responses: {'200': {description: OK}}}
+  /networks/{id}/disconnect:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post: {summary: Disconnect a container from a network, responses: {'200': {description: OK}}}
+  /projects:
+    get: {summary: List project workspaces, responses: {'200': {description: OK}}}
+    post: {summary: Create a project directory; only a name is required, responses: {'201': {description: Created}}}
+  /projects/validate:
+    post: {summary: Validate supplied unsaved Compose and env content, responses: {'200': {description: Valid}}}
+  /projects/{name}:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read project summary/backwards-compatible Compose data, responses: {'200': {description: OK}}}
+    put: {summary: Legacy save of compose.yaml and .env, responses: {'200': {description: OK}}}
+    delete: {summary: Stop Compose when present and delete the project directory, responses: {'200': {description: OK}}}
+  /projects/{name}/files:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: List a directory in the project workspace, responses: {'200': {description: OK}}}
+  /projects/{name}/file:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read an editable text project file, responses: {'200': {description: OK}}}
+    put: {summary: Create or update a text project file, responses: {'200': {description: OK}}}
+    delete: {summary: Delete a project file or directory, responses: {'200': {description: OK}}}
+  /projects/{name}/mkdir:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Create a project directory, responses: {'201': {description: Created}}}
+  /projects/{name}/rename:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Rename/move a project file or directory inside the project root, responses: {'200': {description: OK}}}
+  /projects/{name}/upload:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Upload a file into the project workspace, responses: {'201': {description: Created}}}
+  /projects/{name}/download:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download a project file, responses: {'200': {description: File}}}
+  /projects/{name}/analysis:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Analyze Compose files, services, environment variables/defaults and common missing file references, responses: {'200': {description: OK}}}
+  /projects/{name}/status:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read Compose runtime status for the project, responses: {'200': {description: OK}}}
+  /projects/{name}/logs:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read Compose project logs, responses: {'200': {description: OK}}}
+  /projects/{name}/compose-file:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    put: {summary: Select the active Compose file when multiple are present, responses: {'200': {description: OK}}}
+  /projects/{name}/file-revisions:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: List project-file revision snapshots, responses: {'200': {description: OK}}}
+  /projects/{name}/file-revisions/{revision}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: revision, in: path, required: true, schema: {type: string}}
+    get: {summary: Read one project-file revision, responses: {'200': {description: OK}}}
+  /projects/{name}/file-revisions/{revision}/restore:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: revision, in: path, required: true, schema: {type: string}}
+    post: {summary: Restore a project-file revision, responses: {'200': {description: OK}}}
+  /projects/{name}/revisions:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: List legacy whole Compose/.env revisions, responses: {'200': {description: OK}}}
+  /projects/{name}/revisions/{revision}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: revision, in: path, required: true, schema: {type: string}}
+    get: {summary: Read a legacy project revision, responses: {'200': {description: OK}}}
+  /projects/{name}/revisions/{revision}/restore:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: revision, in: path, required: true, schema: {type: string}}
+    post: {summary: Restore a legacy project revision, responses: {'200': {description: OK}}}
+  /projects/{name}/{action}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+      - {name: action, in: path, required: true, schema: {type: string, description: validate|config|deploy|update|pull|start|stop|restart|down}}
+    post: {summary: Run a Compose project lifecycle action, responses: {'200': {description: OK}}}
+  /registries:
+    get: {summary: List private registry configurations without secrets, responses: {'200': {description: OK}}}
+    post: {summary: Create a private registry configuration, responses: {'200': {description: OK}}}
+  /registries/test:
+    post: {summary: Test registry reachability using provided or stored credentials, responses: {'200': {description: OK}}}
+  /registries/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    put: {summary: Update a private registry configuration, responses: {'200': {description: OK}}}
+    delete: {summary: Delete a private registry configuration and encrypted secret, responses: {'200': {description: OK}}}
+  /api-keys:
+    get: {summary: List API keys, responses: {'200': {description: OK}}}
+    post: {summary: Create a scoped API key, responses: {'201': {description: Created}}}
+  /api-keys/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    delete: {summary: Delete API key, responses: {'200': {description: OK}}}
+  /activity:
+    get: {summary: Read audit activity, responses: {'200': {description: OK}}}
+  /hardware/devices:
+    get: {summary: List detected host devices suitable for explicit container assignment, responses: {'200': {description: OK}}}
+  /resources/map:
+    get:
+      summary: Show host Docker CPU/RAM capacity and container assignments
+      parameters:
+        - {name: capacity, in: query, required: false, schema: {type: integer, enum: [1]}, description: Return only host CPU/RAM capacity without inspecting containers}
+      responses: {'200': {description: OK}}
+  /storage:
+    get: {summary: Analyze Docker image, container, volume and build-cache storage usage, responses: {'200': {description: OK}}}
+  /storage/cleanup:
+    post: {summary: Safely prune selected unused images, stopped containers and/or build cache, responses: {'200': {description: OK}}}
+  /events:
+    get: {summary: Read recent Docker daemon events, responses: {'200': {description: OK}}}
+  /backups:
+    get: {summary: List project and volume backups on this host, responses: {'200': {description: OK}}}
+    post: {summary: Create a project or named-volume backup, responses: {'201': {description: Created}}}
+  /backups/import:
+    post: {summary: Import a ZentContainer backup ZIP, responses: {'201': {description: Imported}}}
+  /backups/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    delete: {summary: Delete a backup, responses: {'200': {description: OK}}}
+  /backups/{id}/restore:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post: {summary: Restore project files and/or named volumes from a backup, responses: {'200': {description: OK}}}
+  /backups/{id}/download:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download a portable ZentContainer backup ZIP, responses: {'200': {description: Backup ZIP}}}
+  /containers/preflight:
+    post: {summary: Validate container settings and detect host-port conflicts before create/recreate, responses: {'200': {description: OK}}}
+  /containers/{id}/processes:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read processes inside a running container, responses: {'200': {description: OK}}}
+  /containers/{id}/diagnostics:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Diagnose container state, exit, health, ports and common runtime problems, responses: {'200': {description: OK}}}
+  /containers/{id}/files:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: List files inside a running container, responses: {'200': {description: OK}}}
+  /containers/{id}/files/content:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read editable text content from a running container, responses: {'200': {description: OK}}}
+    put: {summary: Write a text file into a running container, responses: {'200': {description: OK}}}
+  /containers/{id}/files/download:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download a file from a running container, responses: {'200': {description: File}}}
+  /containers/{id}/convert-compose:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post: {summary: Convert a compatible standalone container into a new Compose project, responses: {'201': {description: Created}}}
+  /containers/{id}/compose-image:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    put: {summary: Safely change the image reference in the Compose source of an externally managed Compose container and re-apply that service, responses: {'200': {description: Updated}}}
+  /images/{id}/history:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get: {summary: Read image layer/history information, responses: {'200': {description: OK}}}
+  /projects/import:
+    post: {summary: Import project files from a ZIP archive, responses: {'201': {description: Created}}}
+  /projects/{name}/diagnostics:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Diagnose Compose configuration, environment, references and project runtime state, responses: {'200': {description: OK}}}
+  /projects/{name}/build:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    post: {summary: Build a Docker image from an existing project Dockerfile, responses: {'200': {description: Build output}}}
+  /projects/{name}/archive:
+    parameters: [{name: name, in: path, required: true, schema: {type: string}}]
+    get: {summary: Download project files as a ZIP archive, responses: {'200': {description: Project ZIP}}}
+components:
+  schemas:
+    ContainerGroupMember:
+      type: object
+      required: [host_id, container_name]
+      properties:
+        host_id: {type: string, description: local or paired Agent ID}
+        container_name: {type: string}
+    ContainerGroupInput:
+      type: object
+      required: [name, members]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 80}
+        members:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/ContainerGroupMember'}
+    DockerStorageSummary:
+      type: object
+      description: Cached Docker Engine disk-usage summary. This is Docker data usage, not total host filesystem capacity.
+      properties:
+        available: {type: boolean, description: True once a recent `/system/df` sample is available}
+        used: {type: integer, format: int64, minimum: 0}
+        images: {type: integer, format: int64, minimum: 0}
+        containers: {type: integer, format: int64, minimum: 0}
+        volumes: {type: integer, format: int64, minimum: 0}
+        build_cache: {type: integer, format: int64, minimum: 0}
+    ContainerStatsBatch:
+      type: object
+      properties:
+        sampled_at: {type: string, format: date-time}
+        partial: {type: boolean, description: True when one or more running containers could not be sampled within the bounded request}
+        containers:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              cpu_percent: {type: number, format: double, minimum: 0}
+              memory_bytes: {type: integer, format: int64, minimum: 0}
+              memory_limit: {type: integer, format: int64, minimum: 0}
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: ZentContainer API key

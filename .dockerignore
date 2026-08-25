@@ -1,0 +1,5 @@
+.git
+.github
+*.zip
+zentcontainer
+.DS_Store
