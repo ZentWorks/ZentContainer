@@ -1,12 +1,19 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/ZentWorks/ZentContainer/internal/dockerx"
 )
 
 func adoptionCompatibility(raw []byte) (string, []string) {
+	return adoptionCompatibilityWithImage(raw, nil)
+}
+
+func adoptionCompatibilityWithImage(raw, imageRaw []byte) (string, []string) {
 	var ci map[string]any
 	if json.Unmarshal(raw, &ci) != nil {
 		return "", []string{"Container-Inspect konnte nicht ausgewertet werden"}
@@ -23,9 +30,10 @@ func adoptionCompatibility(raw []byte) (string, []string) {
 	// The editor currently models the common Docker options only. Adoption is
 	// intentionally conservative: if a recreation could drop a setting, the
 	// container remains externally managed instead of guessing.
-	if v := cfg["Entrypoint"]; v != nil {
-		if a, ok := v.([]any); !ok || len(a) > 0 {
-			reasons = append(reasons, "benutzerdefinierter Entrypoint")
+	if containerEntrypoint := stringSliceAny(cfg["Entrypoint"]); len(containerEntrypoint) > 0 {
+		imageEntrypoint, known := imageDefaultEntrypoint(imageRaw)
+		if !known || !stringSlicesEqual(containerEntrypoint, imageEntrypoint) {
+			reasons = append(reasons, "Entrypoint weicht vom Image-Standard ab")
 		}
 	}
 	for _, k := range []string{"Domainname", "MacAddress"} {
@@ -95,20 +103,121 @@ func adoptionCompatibility(raw []byte) (string, []string) {
 	}
 	if networks, ok := ci["NetworkSettings"].(map[string]any); ok {
 		if endpoints, ok := networks["Networks"].(map[string]any); ok {
-			for _, rawEndpoint := range endpoints {
+			primary := strings.TrimSpace(asString(hc["NetworkMode"]))
+			if primary == "default" {
+				if _, exists := endpoints["bridge"]; exists {
+					primary = "bridge"
+				}
+			}
+			if primary == "" && len(endpoints) == 1 {
+				for networkName := range endpoints {
+					primary = networkName
+				}
+			}
+			containerName := strings.TrimPrefix(asString(ci["Name"]), "/")
+			containerID := asString(ci["Id"])
+			for networkName, rawEndpoint := range endpoints {
 				endpoint, _ := rawEndpoint.(map[string]any)
-				if endpoint["IPAMConfig"] != nil {
-					reasons = append(reasons, "statische Netzwerk-IP-Konfiguration")
-					break
+				if ipam, ok := endpoint["IPAMConfig"].(map[string]any); ok {
+					hasStatic := strings.TrimSpace(asString(ipam["IPv4Address"])) != "" || strings.TrimSpace(asString(ipam["IPv6Address"])) != ""
+					// The editor can faithfully preserve a static address on the primary
+					// Docker network. Static addresses on additional networks are not yet
+					// modeled independently and remain blocked to avoid changing identity.
+					if hasStatic && networkName != primary {
+						reasons = append(reasons, "statische IP auf zusätzlichem Netzwerk "+networkName)
+					}
+					if links, ok := ipam["LinkLocalIPs"].([]any); ok && len(links) > 0 {
+						reasons = append(reasons, "LinkLocalIPs auf Netzwerk "+networkName)
+					}
 				}
 				if opts, ok := endpoint["DriverOpts"].(map[string]any); ok && len(opts) > 0 {
-					reasons = append(reasons, "Netzwerk DriverOpts")
-					break
+					reasons = append(reasons, "Netzwerk DriverOpts auf "+networkName)
+				}
+				if networkName != primary {
+					for _, alias := range stringSliceAny(endpoint["Aliases"]) {
+						if alias != containerName && alias != containerID && alias != shortDockerID(containerID) {
+							reasons = append(reasons, "Netzwerk-Alias auf zusätzlichem Netzwerk "+networkName)
+							break
+						}
+					}
 				}
 			}
 		}
 	}
 	return name, reasons
+}
+
+func stringSliceAny(v any) []string {
+	a, ok := v.([]any)
+	if !ok {
+		if ss, ok := v.([]string); ok {
+			return append([]string(nil), ss...)
+		}
+		return nil
+	}
+	out := make([]string, 0, len(a))
+	for _, x := range a {
+		s := asString(x)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func imageDefaultEntrypoint(raw []byte) ([]string, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var image map[string]any
+	if json.Unmarshal(raw, &image) != nil {
+		return nil, false
+	}
+	cfg, ok := image["Config"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return stringSliceAny(cfg["Entrypoint"]), true
+}
+
+func shortDockerID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func adoptionCompatibilityForDocker(ctx context.Context, d *dockerx.Client, raw []byte) (string, []string) {
+	var meta struct {
+		Image  string `json:"Image"`
+		Config struct {
+			Image string `json:"Image"`
+		} `json:"Config"`
+	}
+	_ = json.Unmarshal(raw, &meta)
+	imageRef := strings.TrimSpace(meta.Image)
+	if imageRef == "" {
+		imageRef = strings.TrimSpace(meta.Config.Image)
+	}
+	var imageRaw []byte
+	if imageRef != "" {
+		if inspected, inspectErr := d.ImageInspect(ctx, imageRef); inspectErr == nil {
+			imageRaw = inspected
+		}
+	}
+	return adoptionCompatibilityWithImage(raw, imageRaw)
 }
 
 func (a *App) containerAdopt(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +231,7 @@ func (a *App) containerAdopt(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 502, "docker_error", err.Error())
 		return
 	}
-	name, reasons := adoptionCompatibility(raw)
+	name, reasons := adoptionCompatibilityForDocker(r.Context(), d, raw)
 	compatible := len(reasons) == 0
 	if r.URL.Query().Get("preview") == "1" {
 		writeJSON(w, map[string]any{"compatible": compatible, "name": name, "reasons": reasons})

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.29
+  version: 0.6.30
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -92,7 +92,7 @@ paths:
   /containers/stats:
     get:
       summary: Get lightweight CPU/RAM/network throughput stats for all running containers on this host
-      description: Uses one bounded per-host batch sample. CPU, RAM and per-container receive/transmit throughput are briefly cached/coalesced so the WebUI can refresh every five seconds without one browser request per container.
+      description: Uses one bounded per-host batch sample. CPU, RAM, cumulative network counters and receive/transmit throughput are briefly cached/coalesced so the WebUI can refresh every five seconds without one browser request per container. Cumulative counters allow remote clients to derive a rate when a fresh Agent sample has no previous server-side point yet.
       responses:
         '200':
           description: Batch container stats
@@ -124,7 +124,7 @@ paths:
     get: {summary: Preview mounted named volumes, image and custom networks and whether each can safely be deleted with the container, responses: {'200': {description: OK}}}
   /containers/{id}/adopt:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-    post: {summary: Preview or record safe adoption of an external standalone container, responses: {'200': {description: OK}}}
+    post: {summary: Preview or record safe adoption of an external standalone container, description: Adoption compares an effective container Entrypoint with the image default and permits static IPv4/IPv6 on the primary network when ZentContainer can preserve it. Unsupported secondary-network identity settings remain blocked., responses: {'200': {description: OK}}}
   /containers/{id}/{action}:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string}}
@@ -175,7 +175,7 @@ paths:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
     get: {summary: Download a volume path as tar.gz, responses: {'200': {description: Archive}}}
   /networks:
-    get: {summary: List networks, responses: {'200': {description: OK}}}
+    get: {summary: List networks, description: Connected-container membership is enriched from a single host container inventory so list counts remain accurate without one inspect call per network., responses: {'200': {description: OK}}}
     post: {summary: Create a Docker network, responses: {'201': {description: Created}}}
   /networks/{id}:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
@@ -383,6 +383,8 @@ components:
               cpu_percent: {type: number, format: double, minimum: 0}
               memory_bytes: {type: integer, format: int64, minimum: 0}
               memory_limit: {type: integer, format: int64, minimum: 0}
+              network_rx_bytes: {type: integer, format: int64, minimum: 0, description: Cumulative bytes received across container network interfaces}
+              network_tx_bytes: {type: integer, format: int64, minimum: 0, description: Cumulative bytes transmitted across container network interfaces}
               network_rx_bytes_per_second: {type: number, format: double, minimum: 0, description: Receive throughput aggregated across container network interfaces}
               network_tx_bytes_per_second: {type: number, format: double, minimum: 0, description: Transmit throughput aggregated across container network interfaces}
   securitySchemes:

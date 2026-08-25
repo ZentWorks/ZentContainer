@@ -101,6 +101,8 @@ type containerStatsRow struct {
 	CPUPercent              float64 `json:"cpu_percent"`
 	MemoryBytes             uint64  `json:"memory_bytes"`
 	MemoryLimit             uint64  `json:"memory_limit"`
+	NetworkRXBytes          uint64  `json:"network_rx_bytes"`
+	NetworkTXBytes          uint64  `json:"network_tx_bytes"`
 	NetworkRXBytesPerSecond float64 `json:"network_rx_bytes_per_second"`
 	NetworkTXBytesPerSecond float64 `json:"network_tx_bytes_per_second"`
 }
@@ -199,7 +201,7 @@ func containerStatsRowAndPoint(raw json.RawMessage, previous *containerStatsCPUP
 			}
 		}
 	}
-	return containerStatsRow{CPUPercent: cpu, MemoryBytes: s.MemoryStats.Usage, MemoryLimit: s.MemoryStats.Limit, NetworkRXBytesPerSecond: rxRate, NetworkTXBytesPerSecond: txRate}, point, true
+	return containerStatsRow{CPUPercent: cpu, MemoryBytes: s.MemoryStats.Usage, MemoryLimit: s.MemoryStats.Limit, NetworkRXBytes: networkRX, NetworkTXBytes: networkTX, NetworkRXBytesPerSecond: rxRate, NetworkTXBytesPerSecond: txRate}, point, true
 }
 
 func (a *App) containerStatsBatch(w http.ResponseWriter, r *http.Request) {

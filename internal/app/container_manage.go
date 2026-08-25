@@ -608,7 +608,7 @@ func (a *App) validateEditableContainer(ctx context.Context, id string, in *cont
 		return nil, editFailure(http.StatusConflict, "external_container", "This container was created outside ZentContainer. Adopt it first before editing.")
 	}
 	if !managed {
-		if _, reasons := adoptionCompatibility(raw); len(reasons) > 0 {
+		if _, reasons := adoptionCompatibilityForDocker(ctx, d, raw); len(reasons) > 0 {
 			return nil, editFailure(http.StatusConflict, "adopted_container_changed", "Container settings changed outside ZentContainer and can no longer be edited safely: "+strings.Join(reasons, ", "))
 		}
 	}

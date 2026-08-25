@@ -86,6 +86,14 @@ type VolumeUsage struct {
 		RefCount int64 `json:"RefCount"`
 	} `json:"UsageData"`
 }
+type NetworkContainer struct {
+	Name        string `json:"Name"`
+	EndpointID  string `json:"EndpointID"`
+	MacAddress  string `json:"MacAddress"`
+	IPv4Address string `json:"IPv4Address"`
+	IPv6Address string `json:"IPv6Address"`
+}
+
 type Network struct {
 	Name       string `json:"Name"`
 	ID         string `json:"Id"`
@@ -100,13 +108,7 @@ type Network struct {
 		Driver string                                        `json:"Driver"`
 		Config []struct{ Subnet, IPAddress, Gateway string } `json:"Config"`
 	} `json:"IPAM"`
-	Containers map[string]struct {
-		Name        string `json:"Name"`
-		EndpointID  string `json:"EndpointID"`
-		MacAddress  string `json:"MacAddress"`
-		IPv4Address string `json:"IPv4Address"`
-		IPv6Address string `json:"IPv6Address"`
-	} `json:"Containers"`
+	Containers map[string]NetworkContainer `json:"Containers"`
 }
 
 type CreateContainerRequest struct {

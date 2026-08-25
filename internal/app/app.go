@@ -2194,6 +2194,12 @@ func (a *App) networks(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 502, "docker_error", err.Error())
 		return
 	}
+	// Docker does not reliably populate Network.Containers in GET /networks.
+	// Enrich the lightweight list from a single all-containers request instead
+	// of issuing one NetworkInspect request per network.
+	if containers, listErr := d.Containers(r.Context(), true); listErr == nil {
+		v = enrichNetworkContainerMembership(v, containers)
+	}
 	writeJSON(w, v)
 }
 func (a *App) networkInspect(w http.ResponseWriter, r *http.Request) {
