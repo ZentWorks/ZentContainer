@@ -36,7 +36,7 @@ func adoptionCompatibilityWithImage(raw, imageRaw []byte) (string, []string) {
 			reasons = append(reasons, "Entrypoint weicht vom Image-Standard ab")
 		}
 	}
-	for _, k := range []string{"Domainname", "MacAddress"} {
+	for _, k := range []string{"Domainname"} {
 		if strings.TrimSpace(asString(cfg[k])) != "" {
 			reasons = append(reasons, k)
 		}
@@ -101,49 +101,10 @@ func adoptionCompatibilityWithImage(raw, imageRaw []byte) (string, []string) {
 			}
 		}
 	}
-	if networks, ok := ci["NetworkSettings"].(map[string]any); ok {
-		if endpoints, ok := networks["Networks"].(map[string]any); ok {
-			primary := strings.TrimSpace(asString(hc["NetworkMode"]))
-			if primary == "default" {
-				if _, exists := endpoints["bridge"]; exists {
-					primary = "bridge"
-				}
-			}
-			if primary == "" && len(endpoints) == 1 {
-				for networkName := range endpoints {
-					primary = networkName
-				}
-			}
-			containerName := strings.TrimPrefix(asString(ci["Name"]), "/")
-			containerID := asString(ci["Id"])
-			for networkName, rawEndpoint := range endpoints {
-				endpoint, _ := rawEndpoint.(map[string]any)
-				if ipam, ok := endpoint["IPAMConfig"].(map[string]any); ok {
-					hasStatic := strings.TrimSpace(asString(ipam["IPv4Address"])) != "" || strings.TrimSpace(asString(ipam["IPv6Address"])) != ""
-					// The editor can faithfully preserve a static address on the primary
-					// Docker network. Static addresses on additional networks are not yet
-					// modeled independently and remain blocked to avoid changing identity.
-					if hasStatic && networkName != primary {
-						reasons = append(reasons, "statische IP auf zusätzlichem Netzwerk "+networkName)
-					}
-					if links, ok := ipam["LinkLocalIPs"].([]any); ok && len(links) > 0 {
-						reasons = append(reasons, "LinkLocalIPs auf Netzwerk "+networkName)
-					}
-				}
-				if opts, ok := endpoint["DriverOpts"].(map[string]any); ok && len(opts) > 0 {
-					reasons = append(reasons, "Netzwerk DriverOpts auf "+networkName)
-				}
-				if networkName != primary {
-					for _, alias := range stringSliceAny(endpoint["Aliases"]) {
-						if alias != containerName && alias != containerID && alias != shortDockerID(containerID) {
-							reasons = append(reasons, "Netzwerk-Alias auf zusätzlichem Netzwerk "+networkName)
-							break
-						}
-					}
-				}
-			}
-		}
-	}
+	// Per-network IPv4/IPv6, MAC addresses, aliases, link-local addresses,
+	// driver options, links and gateway priority are modeled and round-tripped
+	// by the container editor. Do not reject common Unraid/macvlan/ipvlan
+	// identities merely because they are explicit.
 	return name, reasons
 }
 

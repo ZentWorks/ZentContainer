@@ -681,6 +681,20 @@ func remoteResponseHeaderTimeout(method, path string) time.Duration {
 	if method == http.MethodDelete && len(segments) >= 2 && segments[0] == "images" {
 		return 15 * time.Minute
 	}
+	if segments[0] == "containers" {
+		if method == http.MethodPost && len(segments) >= 3 {
+			switch segments[2] {
+			case "update", "rollback":
+				return 15 * time.Minute
+			}
+		}
+		if method == http.MethodPut && len(segments) == 2 {
+			return 15 * time.Minute
+		}
+		if method == http.MethodPost && len(segments) == 1 {
+			return 15 * time.Minute
+		}
+	}
 	if method == http.MethodPost && len(segments) >= 2 {
 		if segments[0] == "images" && segments[1] == "pull" {
 			return 15 * time.Minute

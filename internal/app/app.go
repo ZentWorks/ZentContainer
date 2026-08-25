@@ -1579,8 +1579,9 @@ func (a *App) containerUpdate(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 503, "docker_unavailable", err.Error())
 		return
 	}
+	ctx := r.Context()
 	id := r.PathValue("id")
-	raw, err := d.ContainerInspect(r.Context(), id)
+	raw, err := d.ContainerInspect(ctx, id)
 	if err != nil {
 		errorJSON(w, 502, "docker_error", err.Error())
 		return
@@ -1605,40 +1606,56 @@ func (a *App) containerUpdate(w http.ResponseWriter, r *http.Request) {
 	hostConfig, _ := ci["HostConfig"].(map[string]any)
 	state, _ := ci["State"].(map[string]any)
 	running, _ := state["Running"].(bool)
-	imageRef := asString(configMap["Image"])
-	oldNetworks := map[string]any{}
-	if ns, ok := ci["NetworkSettings"].(map[string]any); ok {
-		if nets, ok := ns["Networks"].(map[string]any); ok {
-			oldNetworks = nets
-		}
-	}
-	for netName, rawEP := range oldNetworks {
-		if ep, ok := rawEP.(map[string]any); ok {
-			if ipam, ok := ep["IPAMConfig"].(map[string]any); ok {
-				if asString(ipam["IPv4Address"]) != "" || asString(ipam["IPv6Address"]) != "" {
-					errorJSON(w, 409, "static_network_ip_update_blocked", "This container uses a static network IP on "+netName+". ZentContainer refuses the automatic update rather than risk changing network identity.")
-					return
-				}
-			}
-		}
-	}
+	imageRef := strings.TrimSpace(asString(configMap["Image"]))
 	if imageRef == "" {
 		errorJSON(w, 400, "no_image", "Container has no image reference")
 		return
 	}
-	if _, err := d.ImagePullAuth(r.Context(), imageRef, a.registryAuthForImage(imageRef)); err != nil {
+	networkSnapshot, err := networkSnapshotFromInspect(raw)
+	if err != nil {
+		errorJSON(w, 500, "network_snapshot_failed", err.Error())
+		return
+	}
+	if _, err := d.ImagePullAuth(ctx, imageRef, a.registryAuthForImage(imageRef)); err != nil {
 		errorJSON(w, 502, "pull_failed", err.Error())
 		return
 	}
 	if running {
-		_ = d.ContainerAction(r.Context(), id, "stop")
+		if err := d.ContainerAction(ctx, id, "stop"); err != nil {
+			errorJSON(w, 502, "stop_failed", err.Error())
+			return
+		}
 	}
 	backup := "zc-backup-" + safeName(name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
-	if err := d.ContainerRename(r.Context(), id, backup); err != nil {
+	if err := d.ContainerRename(ctx, id, backup); err != nil {
 		if running {
-			_ = d.ContainerAction(r.Context(), id, "start")
+			_ = d.ContainerAction(context.Background(), id, "start")
 		}
 		errorJSON(w, 502, "backup_failed", err.Error())
+		return
+	}
+	restoreOld := func() string {
+		parts := []string{}
+		if err := d.ContainerRename(context.Background(), id, name); err != nil {
+			parts = append(parts, "rename: "+err.Error())
+		}
+		if err := connectMissingNetworkSnapshot(context.Background(), d, id, networkSnapshot); err != nil {
+			parts = append(parts, "network restore: "+err.Error())
+		}
+		if running {
+			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+				parts = append(parts, "start: "+err.Error())
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	if err := disconnectNetworkSnapshot(ctx, d, id, networkSnapshot); err != nil {
+		restoreErr := restoreOld()
+		msg := "Could not release the previous network identity: " + err.Error()
+		if restoreErr != "" {
+			msg += "; restore warning: " + restoreErr
+		}
+		errorJSON(w, 502, "network_handoff_failed", msg)
 		return
 	}
 	labels, _ := configMap["Labels"].(map[string]any)
@@ -1652,79 +1669,75 @@ func (a *App) containerUpdate(w http.ResponseWriter, r *http.Request) {
 		body[k] = v
 	}
 	body["HostConfig"] = hostConfig
-	newID, err := d.ContainerCreateMap(r.Context(), name, body)
+	if networking := networkingConfigForCreate(networkSnapshot); networking != nil {
+		body["NetworkingConfig"] = networking
+	}
+	// Preserve the primary MAC for Docker API versions that still consume the legacy Config.MacAddress field.
+	for _, attachment := range networkSnapshot.Attachments {
+		if attachment.Name == networkSnapshot.Primary {
+			if mac := strings.TrimSpace(asString(attachment.Endpoint["MacAddress"])); mac != "" {
+				body["MacAddress"] = mac
+			}
+			break
+		}
+	}
+	newID, err := d.ContainerCreateMap(ctx, name, body)
 	if err != nil {
-		_ = d.ContainerRename(r.Context(), id, name)
-		if running {
-			_ = d.ContainerAction(r.Context(), id, "start")
+		restoreErr := restoreOld()
+		msg := err.Error()
+		if restoreErr != "" {
+			msg += "; previous container restore warning: " + restoreErr
 		}
-		errorJSON(w, 502, "recreate_failed", err.Error())
+		errorJSON(w, 502, "recreate_failed", msg)
 		return
 	}
-	if err := d.ContainerAction(r.Context(), newID, "start"); err != nil {
-		_ = d.ContainerRemove(r.Context(), newID, true)
-		_ = d.ContainerRename(r.Context(), id, name)
-		if running {
-			_ = d.ContainerAction(r.Context(), id, "start")
+	rollbackNew := func(code, message string) {
+		_ = d.ContainerRemove(context.Background(), newID, true)
+		restoreErr := restoreOld()
+		if restoreErr != "" {
+			message += "; previous container restore warning: " + restoreErr
 		}
-		errorJSON(w, 502, "start_failed", "New container failed; old container restored: "+err.Error())
+		errorJSON(w, 502, code, message)
+	}
+	if err := connectNetworkSnapshot(ctx, d, newID, networkSnapshot, true); err != nil {
+		rollbackNew("network_restore_failed", "Replacement could not restore all networks: "+err.Error())
 		return
 	}
-	newRaw, _ := d.ContainerInspect(r.Context(), newID)
-	newNetworks := map[string]bool{}
-	var ni map[string]any
-	if json.Unmarshal(newRaw, &ni) == nil {
-		if ns, ok := ni["NetworkSettings"].(map[string]any); ok {
-			if nets, ok := ns["Networks"].(map[string]any); ok {
-				for n := range nets {
-					newNetworks[n] = true
-				}
-			}
-		}
-	}
-	for netName, rawEP := range oldNetworks {
-		if newNetworks[netName] || netName == "host" || netName == "none" {
-			continue
-		}
-		epOut := map[string]any{}
-		if ep, ok := rawEP.(map[string]any); ok {
-			for _, key := range []string{"Aliases", "Links", "DriverOpts", "GwPriority"} {
-				if v, exists := ep[key]; exists && v != nil {
-					epOut[key] = v
-				}
-			}
-		}
-		if err := d.NetworkConnectConfig(r.Context(), netName, newID, epOut); err != nil {
-			_ = d.ContainerRemove(r.Context(), newID, true)
-			_ = d.ContainerRename(r.Context(), id, name)
-			if running {
-				_ = d.ContainerAction(r.Context(), id, "start")
-			}
-			errorJSON(w, 502, "network_restore_failed", "Replacement could not be attached to network "+netName+"; old container restored: "+err.Error())
+	if running {
+		if err := d.ContainerAction(ctx, newID, "start"); err != nil {
+			rollbackNew("start_failed", "New container failed; old container restored: "+err.Error())
 			return
 		}
 	}
-	healthTimeout := time.Duration(a.getRuntimeSettings().HealthTimeoutSeconds) * time.Second
-	if err := waitContainerHealthy(r.Context(), d, newID, healthTimeout); err != nil {
-		_ = d.ContainerRemove(context.Background(), newID, true)
-		_ = d.ContainerRename(context.Background(), id, name)
-		if running {
-			_ = d.ContainerAction(context.Background(), id, "start")
-		}
-		errorJSON(w, 502, "healthcheck_failed", "New container failed health verification; previous container restored: "+err.Error())
+	newRaw, err := d.ContainerInspect(ctx, newID)
+	if err != nil {
+		rollbackNew("network_verify_failed", "Replacement could not be inspected after recreate: "+err.Error())
 		return
+	}
+	if err := verifyNetworkSnapshot(newRaw, networkSnapshot); err != nil {
+		rollbackNew("network_verify_failed", "Replacement network identity verification failed: "+err.Error())
+		return
+	}
+	if running {
+		healthTimeout := time.Duration(a.getRuntimeSettings().HealthTimeoutSeconds) * time.Second
+		if err := waitContainerHealthy(ctx, d, newID, healthTimeout); err != nil {
+			rollbackNew("healthcheck_failed", "New container failed health verification; previous container restored: "+err.Error())
+			return
+		}
 	}
 	a.db.AddAudit(a.currentActor(r), "container.update", name, "backup="+backup)
 	writeJSON(w, map[string]any{"ok": true, "container_id": newID, "rollback_available": true, "backup": backup})
 }
+
 func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 	d, err := a.docker()
 	if err != nil {
 		errorJSON(w, 503, "docker_unavailable", err.Error())
 		return
 	}
+	ctx := r.Context()
 	id := r.PathValue("id")
-	raw, err := d.ContainerInspect(r.Context(), id)
+	raw, err := d.ContainerInspect(ctx, id)
 	if err != nil {
 		errorJSON(w, 502, "docker_error", err.Error())
 		return
@@ -1732,10 +1745,18 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 	var cur struct {
 		Name  string `json:"Name"`
 		Image string `json:"Image"`
+		State struct {
+			Running bool `json:"Running"`
+		} `json:"State"`
 	}
 	_ = json.Unmarshal(raw, &cur)
 	name := strings.TrimPrefix(cur.Name, "/")
-	all, err := d.Containers(r.Context(), true)
+	currentNetworks, err := networkSnapshotFromInspect(raw)
+	if err != nil {
+		errorJSON(w, 500, "network_snapshot_failed", err.Error())
+		return
+	}
+	all, err := d.Containers(ctx, true)
 	if err != nil {
 		errorJSON(w, 502, "docker_error", err.Error())
 		return
@@ -1758,24 +1779,110 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(backups, func(i, j int) bool { return backups[i].Created > backups[j].Created })
 	old := backups[0]
-	_ = d.ContainerAction(r.Context(), id, "stop")
+	backupName := ""
+	if len(old.Names) > 0 {
+		backupName = strings.TrimPrefix(old.Names[0], "/")
+	}
+	rollbackNetworks := currentNetworks
+	// Backups created before v0.6.31 can still be attached to their original
+	// networks. In that case their own endpoint identity is authoritative. New
+	// handoff-aware backups are networkless and intentionally inherit the
+	// current container's verified identity during rollback.
+	if oldRaw, inspectErr := d.ContainerInspect(ctx, old.ID); inspectErr == nil {
+		if oldSnapshot, snapErr := networkSnapshotFromInspect(oldRaw); snapErr == nil && len(oldSnapshot.Attachments) > 0 {
+			rollbackNetworks = oldSnapshot
+		}
+	}
+	if cur.State.Running {
+		if err := d.ContainerAction(ctx, id, "stop"); err != nil {
+			errorJSON(w, 502, "rollback_failed", err.Error())
+			return
+		}
+	}
+	if err := disconnectNetworkSnapshot(ctx, d, id, currentNetworks); err != nil {
+		if cur.State.Running {
+			_ = d.ContainerAction(context.Background(), id, "start")
+		}
+		errorJSON(w, 502, "rollback_failed", "Could not release current network identity: "+err.Error())
+		return
+	}
 	temp := "zc-failed-" + safeName(name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
-	if err := d.ContainerRename(r.Context(), id, temp); err != nil {
+	if err := d.ContainerRename(ctx, id, temp); err != nil {
+		_ = connectMissingNetworkSnapshot(context.Background(), d, id, currentNetworks)
+		if cur.State.Running {
+			_ = d.ContainerAction(context.Background(), id, "start")
+		}
 		errorJSON(w, 502, "rollback_failed", err.Error())
 		return
 	}
-	if err := d.ContainerRename(r.Context(), old.ID, name); err != nil {
-		_ = d.ContainerRename(r.Context(), id, name)
-		errorJSON(w, 502, "rollback_failed", err.Error())
+	restoreCurrent := func() string {
+		parts := []string{}
+		_ = d.ContainerAction(context.Background(), old.ID, "stop")
+		_ = disconnectNetworkSnapshot(context.Background(), d, old.ID, rollbackNetworks)
+		if backupName != "" {
+			if err := d.ContainerRename(context.Background(), old.ID, backupName); err != nil {
+				parts = append(parts, "backup rename: "+err.Error())
+			}
+		}
+		if err := d.ContainerRename(context.Background(), id, name); err != nil {
+			parts = append(parts, "current rename: "+err.Error())
+		}
+		if err := connectMissingNetworkSnapshot(context.Background(), d, id, currentNetworks); err != nil {
+			parts = append(parts, "current network restore: "+err.Error())
+		}
+		if cur.State.Running {
+			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+				parts = append(parts, "current start: "+err.Error())
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	if err := d.ContainerRename(ctx, old.ID, name); err != nil {
+		warn := restoreCurrent()
+		msg := err.Error()
+		if warn != "" {
+			msg += "; restore warning: " + warn
+		}
+		errorJSON(w, 502, "rollback_failed", msg)
 		return
 	}
-	if err := d.ContainerAction(r.Context(), old.ID, "start"); err != nil {
-		errorJSON(w, 502, "rollback_failed", err.Error())
+	if err := connectMissingNetworkSnapshot(ctx, d, old.ID, rollbackNetworks); err != nil {
+		warn := restoreCurrent()
+		msg := "Could not restore rollback network identity: " + err.Error()
+		if warn != "" {
+			msg += "; restore warning: " + warn
+		}
+		errorJSON(w, 502, "rollback_failed", msg)
 		return
 	}
-	_ = d.ContainerRemove(r.Context(), id, true)
+	if cur.State.Running {
+		if err := d.ContainerAction(ctx, old.ID, "start"); err != nil {
+			warn := restoreCurrent()
+			msg := err.Error()
+			if warn != "" {
+				msg += "; restore warning: " + warn
+			}
+			errorJSON(w, 502, "rollback_failed", msg)
+			return
+		}
+	}
+	oldRaw, inspectErr := d.ContainerInspect(ctx, old.ID)
+	if inspectErr != nil || verifyNetworkSnapshot(oldRaw, rollbackNetworks) != nil {
+		verifyErr := inspectErr
+		if verifyErr == nil {
+			verifyErr = verifyNetworkSnapshot(oldRaw, rollbackNetworks)
+		}
+		warn := restoreCurrent()
+		msg := "Rollback network identity verification failed: " + verifyErr.Error()
+		if warn != "" {
+			msg += "; restore warning: " + warn
+		}
+		errorJSON(w, 502, "rollback_failed", msg)
+		return
+	}
+	_ = d.ContainerRemove(ctx, id, true)
 	if cur.Image != "" {
-		remaining, _ := d.Containers(r.Context(), true)
+		remaining, _ := d.Containers(ctx, true)
 		used := false
 		for _, c := range remaining {
 			if c.ImageID == cur.Image {
@@ -1784,7 +1891,7 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !used {
-			_ = d.ImageRemove(r.Context(), cur.Image, false)
+			_ = d.ImageRemove(ctx, cur.Image, false)
 		}
 	}
 	a.db.AddAudit(a.currentActor(r), "container.rollback", name, "")

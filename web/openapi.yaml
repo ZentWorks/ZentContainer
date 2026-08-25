@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.30
+  version: 0.6.31
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -88,7 +88,14 @@ paths:
     post: {summary: Start, stop or restart every member of a container group across its hosts, responses: {'200': {description: Per-member action results}}}
   /containers:
     get: {summary: List containers, responses: {'200': {description: OK}}}
-    post: {summary: Create and start a standalone container, responses: {'201': {description: Created}}}
+    post:
+      summary: Create and start a standalone container
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContainerInput'}
+      responses: {'201': {description: Created}}
   /containers/stats:
     get:
       summary: Get lightweight CPU/RAM/network throughput stats for all running containers on this host
@@ -106,6 +113,11 @@ paths:
       summary: Validate and apply or defer new settings for a ZentContainer-managed standalone container
       parameters:
         - {name: apply, in: query, required: false, schema: {type: string, enum: [now, later], default: now}, description: Apply by safe recreate now or store until the next ZentContainer Start/Restart}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContainerInput'}
       responses: {'200': {description: Updated or queued}}
     delete:
       summary: Delete a container and optionally remove now-unused named volumes, image and custom networks
@@ -124,7 +136,7 @@ paths:
     get: {summary: Preview mounted named volumes, image and custom networks and whether each can safely be deleted with the container, responses: {'200': {description: OK}}}
   /containers/{id}/adopt:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
-    post: {summary: Preview or record safe adoption of an external standalone container, description: Adoption compares an effective container Entrypoint with the image default and permits static IPv4/IPv6 on the primary network when ZentContainer can preserve it. Unsupported secondary-network identity settings remain blocked., responses: {'200': {description: OK}}}
+    post: {summary: Preview or record safe adoption of an external standalone container, description: Adoption compares an effective container Entrypoint with the image default and permits representable per-network identity including static IPv4/IPv6, MAC addresses, aliases, link-local IPs, links, driver options and gateway priority., responses: {'200': {description: OK}}}
   /containers/{id}/{action}:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string}}
@@ -345,6 +357,50 @@ paths:
     get: {summary: Download project files as a ZIP archive, responses: {'200': {description: Project ZIP}}}
 components:
   schemas:
+    ContainerNetworkConfig:
+      type: object
+      required: [name]
+      description: Per-network identity used when a standalone container is created or safely recreated. Empty IP/MAC fields let Docker assign them automatically.
+      properties:
+        name: {type: string}
+        ipv4: {type: string, description: Optional static IPv4 address}
+        ipv6: {type: string, description: Optional static IPv6 address}
+        macAddress: {type: string, description: Optional six-byte MAC address}
+        aliases: {type: array, items: {type: string}}
+        linkLocalIPs: {type: array, items: {type: string}}
+        links: {type: array, items: {type: string}}
+        driverOpts: {type: object, additionalProperties: {type: string}}
+        gwPriority: {type: integer}
+    ContainerInput:
+      type: object
+      required: [name, image]
+      properties:
+        name: {type: string}
+        image: {type: string}
+        restart: {type: string}
+        workingDir: {type: string}
+        hostname: {type: string}
+        user: {type: string}
+        command: {type: string}
+        commandArgs: {type: array, items: {type: string}}
+        memoryMB: {type: integer, format: int64, minimum: 0}
+        memoryReservationMB: {type: integer, format: int64, minimum: 0}
+        memorySwapMB: {type: integer, format: int64, minimum: 0}
+        cpus: {type: number, minimum: 0}
+        cpuSet: {type: string}
+        cpuShares: {type: integer, format: int64, minimum: 0}
+        pidsLimit: {type: integer, format: int64, minimum: 0}
+        env: {type: object, additionalProperties: {type: string}}
+        networks: {type: array, items: {type: string}}
+        networkConfigs:
+          type: array
+          description: Per-network IP/MAC/alias identity. A selected network omitted here keeps its current identity on edit for backward-compatible API clients.
+          items: {$ref: '#/components/schemas/ContainerNetworkConfig'}
+        staticIPv4: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
+        staticIPv6: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
+        macAddress: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
+        networkAliases: {type: array, deprecated: true, items: {type: string}, description: Legacy primary-network field; use networkConfigs}
+        dns: {type: array, items: {type: string}}
     ContainerGroupMember:
       type: object
       required: [host_id, container_name]

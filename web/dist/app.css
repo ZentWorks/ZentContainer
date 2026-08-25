@@ -90,3 +90,12 @@
 
 /* v0.6.29 header-only collapse for hosts and groups */
 .groupCollapseToggle{appearance:none;border:0;background:transparent;color:inherit;padding:0;cursor:pointer;font:inherit;text-align:left;min-width:0}.groupCollapseChevron{display:inline-flex;width:14px;justify-content:center;color:var(--muted);transition:transform .2s ease;flex:0 0 auto}.groupCardCollapse{display:grid;grid-template-rows:1fr;overflow:hidden;transition:grid-template-rows .22s ease}.groupCardCollapse>.groupMembers{min-height:0;overflow:hidden}.groupCard.collapsed .groupCardCollapse{grid-template-rows:0fr}.groupCard.collapsed .groupCardHead{border-bottom-color:transparent}.groupCard.collapsed .groupCollapseChevron{transform:rotate(-90deg)}
+
+/* v0.6.31 per-network identity editor */
+.networkConfigFields{display:grid;gap:10px;margin-top:12px}
+.networkConfigCard{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--panel-2,rgba(255,255,255,.015))}
+.networkConfigHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.networkConfigHead small{color:var(--muted)}
+.networkIdentityGrid{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media(max-width:1050px){.networkIdentityGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){.networkIdentityGrid{grid-template-columns:1fr}}

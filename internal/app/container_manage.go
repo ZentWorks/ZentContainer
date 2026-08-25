@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -35,6 +36,18 @@ type containerExtraHost struct {
 	Host    string `json:"host"`
 	Address string `json:"address"`
 }
+type containerNetworkInput struct {
+	Name         string            `json:"name"`
+	IPv4         string            `json:"ipv4,omitempty"`
+	IPv6         string            `json:"ipv6,omitempty"`
+	MACAddress   string            `json:"macAddress,omitempty"`
+	Aliases      []string          `json:"aliases,omitempty"`
+	LinkLocalIPs []string          `json:"linkLocalIPs,omitempty"`
+	Links        []string          `json:"links,omitempty"`
+	DriverOpts   map[string]string `json:"driverOpts,omitempty"`
+	GwPriority   int               `json:"gwPriority,omitempty"`
+}
+
 type containerHealthInput struct {
 	Type        string `json:"type"`
 	Value       string `json:"value"`
@@ -44,34 +57,36 @@ type containerHealthInput struct {
 	StartSec    int64  `json:"startSec"`
 }
 type containerInput struct {
-	Name                string                 `json:"name"`
-	Image               string                 `json:"image"`
-	Restart             string                 `json:"restart"`
-	WorkingDir          string                 `json:"workingDir"`
-	Hostname            string                 `json:"hostname"`
-	User                string                 `json:"user"`
-	Command             string                 `json:"command"`
-	CommandArgs         []string               `json:"commandArgs,omitempty"`
-	MemoryMB            int64                  `json:"memoryMB"`
-	MemoryReservationMB int64                  `json:"memoryReservationMB"`
-	MemorySwapMB        int64                  `json:"memorySwapMB"`
-	CPUs                float64                `json:"cpus"`
-	CPUSet              string                 `json:"cpuSet"`
-	CPUShares           int64                  `json:"cpuShares"`
-	PidsLimit           int64                  `json:"pidsLimit"`
-	Env                 map[string]string      `json:"env"`
-	Ports               []containerPortInput   `json:"ports"`
-	Volumes             []containerVolumeInput `json:"volumes"`
-	Networks            []string               `json:"networks"`
-	Network             string                 `json:"network"`
-	StaticIPv4          string                 `json:"staticIPv4"`
-	StaticIPv6          string                 `json:"staticIPv6"`
-	NetworkAliases      []string               `json:"networkAliases"`
-	DNS                 []string               `json:"dns"`
-	ExtraHosts          []containerExtraHost   `json:"extraHosts"`
-	Devices             []containerDeviceInput `json:"devices"`
-	GPUAll              bool                   `json:"gpuAll"`
-	Health              containerHealthInput   `json:"health"`
+	Name                string                  `json:"name"`
+	Image               string                  `json:"image"`
+	Restart             string                  `json:"restart"`
+	WorkingDir          string                  `json:"workingDir"`
+	Hostname            string                  `json:"hostname"`
+	User                string                  `json:"user"`
+	Command             string                  `json:"command"`
+	CommandArgs         []string                `json:"commandArgs,omitempty"`
+	MemoryMB            int64                   `json:"memoryMB"`
+	MemoryReservationMB int64                   `json:"memoryReservationMB"`
+	MemorySwapMB        int64                   `json:"memorySwapMB"`
+	CPUs                float64                 `json:"cpus"`
+	CPUSet              string                  `json:"cpuSet"`
+	CPUShares           int64                   `json:"cpuShares"`
+	PidsLimit           int64                   `json:"pidsLimit"`
+	Env                 map[string]string       `json:"env"`
+	Ports               []containerPortInput    `json:"ports"`
+	Volumes             []containerVolumeInput  `json:"volumes"`
+	Networks            []string                `json:"networks"`
+	Network             string                  `json:"network"`
+	StaticIPv4          string                  `json:"staticIPv4"`
+	StaticIPv6          string                  `json:"staticIPv6"`
+	NetworkAliases      []string                `json:"networkAliases"`
+	MACAddress          string                  `json:"macAddress,omitempty"`
+	NetworkConfigs      []containerNetworkInput `json:"networkConfigs,omitempty"`
+	DNS                 []string                `json:"dns"`
+	ExtraHosts          []containerExtraHost    `json:"extraHosts"`
+	Devices             []containerDeviceInput  `json:"devices"`
+	GPUAll              bool                    `json:"gpuAll"`
+	Health              containerHealthInput    `json:"health"`
 }
 
 var containerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -85,6 +100,86 @@ func validateContainerName(name string) error {
 		return errors.New("invalid container name: use letters, numbers, dot, underscore or dash; the first character must be a letter or number")
 	}
 	return nil
+}
+
+func normalizeIP(value string, wantV6 bool) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", value)
+	}
+	if wantV6 {
+		if ip.To4() != nil {
+			return "", fmt.Errorf("expected IPv6 address, got %s", value)
+		}
+	} else if ip.To4() == nil {
+		return "", fmt.Errorf("expected IPv4 address, got %s", value)
+	}
+	return ip.String(), nil
+}
+
+func normalizeMAC(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	hw, err := net.ParseMAC(value)
+	if err != nil || len(hw) != 6 {
+		return "", fmt.Errorf("invalid MAC address: %s", value)
+	}
+	allZero := true
+	for _, b := range hw {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero || hw[0]&1 != 0 {
+		return "", fmt.Errorf("invalid unicast MAC address: %s", value)
+	}
+	return hw.String(), nil
+}
+
+func cleanStringList(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func networkConfigMap(in containerInput) map[string]containerNetworkInput {
+	out := make(map[string]containerNetworkInput, len(in.NetworkConfigs))
+	for _, cfg := range in.NetworkConfigs {
+		if cfg.Name != "" {
+			out[cfg.Name] = cfg
+		}
+	}
+	return out
+}
+
+func endpointSettingsFromInput(cfg containerNetworkInput) dockerx.EndpointSettings {
+	var ipam *dockerx.EndpointIPAMConfig
+	if cfg.IPv4 != "" || cfg.IPv6 != "" || len(cfg.LinkLocalIPs) > 0 {
+		ipam = &dockerx.EndpointIPAMConfig{IPv4Address: cfg.IPv4, IPv6Address: cfg.IPv6, LinkLocalIPs: append([]string(nil), cfg.LinkLocalIPs...)}
+	}
+	return dockerx.EndpointSettings{
+		IPAMConfig: ipam,
+		Links:      append([]string(nil), cfg.Links...),
+		Aliases:    append([]string(nil), cfg.Aliases...),
+		MacAddress: cfg.MACAddress,
+		DriverOpts: cfg.DriverOpts,
+		GwPriority: cfg.GwPriority,
+	}
 }
 
 type hostResourceLimits struct {
@@ -212,6 +307,101 @@ func normalizeContainerInput(in *containerInput) error {
 		}
 	}
 	in.Networks = cleanNets
+	in.MACAddress = strings.TrimSpace(in.MACAddress)
+	if len(in.Networks) == 0 && (in.StaticIPv4 != "" || in.StaticIPv6 != "" || in.MACAddress != "" || len(in.NetworkAliases) > 0 || len(in.NetworkConfigs) > 0) {
+		return errors.New("network identity settings require at least one network")
+	}
+	selected := map[string]bool{}
+	for _, name := range in.Networks {
+		selected[name] = true
+	}
+	configs := map[string]containerNetworkInput{}
+	for _, cfg := range in.NetworkConfigs {
+		cfg.Name = strings.TrimSpace(cfg.Name)
+		if cfg.Name == "" {
+			continue
+		}
+		if !selected[cfg.Name] {
+			return fmt.Errorf("network configuration references unselected network %s", cfg.Name)
+		}
+		if _, exists := configs[cfg.Name]; exists {
+			return fmt.Errorf("duplicate network configuration for %s", cfg.Name)
+		}
+		var err error
+		if cfg.IPv4, err = normalizeIP(cfg.IPv4, false); err != nil {
+			return fmt.Errorf("network %s: %w", cfg.Name, err)
+		}
+		if cfg.IPv6, err = normalizeIP(cfg.IPv6, true); err != nil {
+			return fmt.Errorf("network %s: %w", cfg.Name, err)
+		}
+		if cfg.MACAddress, err = normalizeMAC(cfg.MACAddress); err != nil {
+			return fmt.Errorf("network %s: %w", cfg.Name, err)
+		}
+		cfg.Aliases = cleanStringList(cfg.Aliases)
+		cfg.Links = cleanStringList(cfg.Links)
+		cfg.LinkLocalIPs = cleanStringList(cfg.LinkLocalIPs)
+		for i, ip := range cfg.LinkLocalIPs {
+			parsed := net.ParseIP(ip)
+			if parsed == nil {
+				return fmt.Errorf("network %s: invalid link-local IP address: %s", cfg.Name, ip)
+			}
+			cfg.LinkLocalIPs[i] = parsed.String()
+		}
+		if cfg.DriverOpts != nil {
+			clean := map[string]string{}
+			for k, v := range cfg.DriverOpts {
+				k = strings.TrimSpace(k)
+				if k != "" {
+					clean[k] = v
+				}
+			}
+			cfg.DriverOpts = clean
+		}
+		configs[cfg.Name] = cfg
+	}
+	if len(in.Networks) > 0 {
+		primary := in.Networks[0]
+		legacy := configs[primary]
+		legacy.Name = primary
+		if legacy.IPv4 == "" && in.StaticIPv4 != "" {
+			var err error
+			legacy.IPv4, err = normalizeIP(in.StaticIPv4, false)
+			if err != nil {
+				return fmt.Errorf("network %s: %w", primary, err)
+			}
+		}
+		if legacy.IPv6 == "" && in.StaticIPv6 != "" {
+			var err error
+			legacy.IPv6, err = normalizeIP(in.StaticIPv6, true)
+			if err != nil {
+				return fmt.Errorf("network %s: %w", primary, err)
+			}
+		}
+		if legacy.MACAddress == "" && in.MACAddress != "" {
+			var err error
+			legacy.MACAddress, err = normalizeMAC(in.MACAddress)
+			if err != nil {
+				return fmt.Errorf("network %s: %w", primary, err)
+			}
+		}
+		if len(legacy.Aliases) == 0 && len(in.NetworkAliases) > 0 {
+			legacy.Aliases = cleanStringList(in.NetworkAliases)
+		}
+		if legacy.IPv4 != "" || legacy.IPv6 != "" || legacy.MACAddress != "" || len(legacy.Aliases) > 0 || len(legacy.LinkLocalIPs) > 0 || len(legacy.Links) > 0 || len(legacy.DriverOpts) > 0 || legacy.GwPriority != 0 {
+			configs[primary] = legacy
+		}
+	}
+	in.NetworkConfigs = in.NetworkConfigs[:0]
+	for _, name := range in.Networks {
+		if cfg, ok := configs[name]; ok {
+			in.NetworkConfigs = append(in.NetworkConfigs, cfg)
+		}
+	}
+	if len(in.Networks) > 0 {
+		if cfg, ok := configs[in.Networks[0]]; ok {
+			in.StaticIPv4, in.StaticIPv6, in.MACAddress, in.NetworkAliases = cfg.IPv4, cfg.IPv6, cfg.MACAddress, append([]string(nil), cfg.Aliases...)
+		}
+	}
 	for i := range in.Ports {
 		p := &in.Ports[i]
 		p.Host = strings.TrimSpace(p.Host)
@@ -419,8 +609,12 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 		hc.DeviceRequests = []dockerx.DeviceRequest{{Driver: "", Count: -1, Capabilities: [][]string{{"gpu"}}}}
 	}
 	req := dockerx.CreateContainerRequest{Image: in.Image, Cmd: cmd, Env: env, WorkingDir: in.WorkingDir, Hostname: in.Hostname, User: in.User, Labels: labels, ExposedPorts: exp, Healthcheck: healthConfig(in.Health), HostConfig: hc}
-	if networkMode != "" && (in.StaticIPv4 != "" || in.StaticIPv6 != "" || len(in.NetworkAliases) > 0) {
-		req.NetworkingConfig = &dockerx.NetworkingConfig{EndpointsConfig: map[string]dockerx.EndpointSettings{networkMode: {IPAMConfig: &dockerx.EndpointIPAMConfig{IPv4Address: in.StaticIPv4, IPv6Address: in.StaticIPv6}, Aliases: in.NetworkAliases}}}
+	if networkMode != "" {
+		if cfg, ok := networkConfigMap(in)[networkMode]; ok {
+			endpoint := endpointSettingsFromInput(cfg)
+			req.NetworkingConfig = &dockerx.NetworkingConfig{EndpointsConfig: map[string]dockerx.EndpointSettings{networkMode: endpoint}}
+			req.MacAddress = cfg.MACAddress // legacy Docker compatibility for the primary endpoint
+		}
 	}
 	return req
 }
@@ -530,10 +724,16 @@ func (a *App) createManagedContainer(ctx context.Context, in containerInput, pul
 			_ = d.ContainerRemove(context.Background(), id, true)
 		}
 	}()
-	for _, n := range in.Networks[1:] {
-		if err := d.NetworkConnect(ctx, n, id); err != nil {
-			return "", fmt.Errorf("attach network %s: %w", n, err)
-		}
+	desiredNetworks := networkSnapshotFromInput(in)
+	if err := connectNetworkSnapshot(ctx, d, id, desiredNetworks, true); err != nil {
+		return "", err
+	}
+	raw, err := d.ContainerInspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if err := verifyNetworkSnapshot(raw, desiredNetworks); err != nil {
+		return "", fmt.Errorf("verify network identity: %w", err)
 	}
 	if err := d.ContainerAction(ctx, id, "start"); err != nil {
 		return "", err
@@ -559,12 +759,13 @@ func zentContainerStandaloneLabels(labels map[string]string) bool {
 }
 
 type editableContainerState struct {
-	Docker  *dockerx.Client
-	Name    string
-	Managed bool
-	Running bool
-	Labels  map[string]string
-	Cmd     []string
+	Docker          *dockerx.Client
+	Name            string
+	Managed         bool
+	Running         bool
+	Labels          map[string]string
+	Cmd             []string
+	NetworkSnapshot containerNetworkSnapshot
 }
 
 func (a *App) validateEditableContainer(ctx context.Context, id string, in *containerInput) (*editableContainerState, *containerEditFailure) {
@@ -597,6 +798,27 @@ func (a *App) validateEditableContainer(ctx context.Context, id string, in *cont
 	}
 	if old.Config.Labels == nil {
 		old.Config.Labels = map[string]string{}
+	}
+	// API clients that do not send the newer per-network identity model must
+	// not silently erase existing static IPs, MAC addresses, aliases or other
+	// endpoint settings. Preserve only selected networks that were omitted; an
+	// explicit networkConfigs entry (even with empty values) remains authoritative.
+	if snap, snapErr := networkSnapshotFromInspect(raw); snapErr == nil {
+		existingConfigs := networkConfigMap(*in)
+		selected := map[string]bool{}
+		for _, networkName := range in.Networks {
+			selected[networkName] = true
+		}
+		for _, cfg := range networkInputsFromSnapshot(snap) {
+			if selected[cfg.Name] {
+				if _, provided := existingConfigs[cfg.Name]; !provided {
+					in.NetworkConfigs = append(in.NetworkConfigs, cfg)
+				}
+			}
+		}
+		if err := normalizeContainerInput(in); err != nil {
+			return nil, editFailure(http.StatusBadRequest, "invalid_container", err.Error())
+		}
 	}
 	standalone := zentContainerStandaloneLabels(old.Config.Labels)
 	if project := strings.TrimSpace(old.Config.Labels["com.docker.compose.project"]); project != "" && !standalone {
@@ -632,7 +854,11 @@ func (a *App) validateEditableContainer(ctx context.Context, id string, in *cont
 	if len(in.CommandArgs) == 0 && in.Command == strings.Join(old.Config.Cmd, " ") {
 		in.CommandArgs = append([]string(nil), old.Config.Cmd...)
 	}
-	return &editableContainerState{Docker: d, Name: oldName, Managed: managed, Running: old.State.Running, Labels: old.Config.Labels, Cmd: old.Config.Cmd}, nil
+	networkSnapshot, snapErr := networkSnapshotFromInspect(raw)
+	if snapErr != nil {
+		return nil, editFailure(http.StatusInternalServerError, "network_snapshot_failed", snapErr.Error())
+	}
+	return &editableContainerState{Docker: d, Name: oldName, Managed: managed, Running: old.State.Running, Labels: old.Config.Labels, Cmd: old.Config.Cmd, NetworkSnapshot: networkSnapshot}, nil
 }
 
 func (a *App) recreateEditableContainer(ctx context.Context, id string, in containerInput, forceStart bool) (string, string, *containerEditFailure) {
@@ -656,8 +882,30 @@ func (a *App) recreateEditableContainer(ctx context.Context, id string, in conta
 		}
 		return "", old.Name, editFailure(http.StatusBadGateway, "backup_failed", err.Error())
 	}
+	restoreOld := func() string {
+		parts := []string{}
+		if err := d.ContainerRename(context.Background(), id, old.Name); err != nil {
+			parts = append(parts, "rename: "+err.Error())
+		}
+		if err := connectMissingNetworkSnapshot(context.Background(), d, id, old.NetworkSnapshot); err != nil {
+			parts = append(parts, "network restore: "+err.Error())
+		}
+		if old.Running {
+			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+				parts = append(parts, "start: "+err.Error())
+			}
+		}
+		return strings.Join(parts, "; ")
+	}
+	if err := disconnectNetworkSnapshot(ctx, d, id, old.NetworkSnapshot); err != nil {
+		warn := restoreOld()
+		msg := "Could not release the previous network identity: " + err.Error()
+		if warn != "" {
+			msg += "; restore warning: " + warn
+		}
+		return "", old.Name, editFailure(http.StatusBadGateway, "network_handoff_failed", msg)
+	}
 	req := buildContainerRequest(in)
-	// Adoption must never silently drop labels an external container depends on.
 	if !old.Managed {
 		for k, v := range old.Labels {
 			if _, exists := req.Labels[k]; !exists {
@@ -667,11 +915,12 @@ func (a *App) recreateEditableContainer(ctx context.Context, id string, in conta
 	}
 	newID, err := d.ContainerCreate(ctx, in.Name, req)
 	if err != nil {
-		_ = d.ContainerRename(context.Background(), id, old.Name)
-		if old.Running {
-			_ = d.ContainerAction(context.Background(), id, "start")
+		warn := restoreOld()
+		msg := err.Error()
+		if warn != "" {
+			msg += "; previous container restore warning: " + warn
 		}
-		return "", old.Name, editFailure(http.StatusBadGateway, "recreate_failed", err.Error())
+		return "", old.Name, editFailure(http.StatusBadGateway, "recreate_failed", msg)
 	}
 	failed := true
 	defer func() {
@@ -679,28 +928,31 @@ func (a *App) recreateEditableContainer(ctx context.Context, id string, in conta
 			_ = d.ContainerRemove(context.Background(), newID, true)
 		}
 	}()
-	for _, n := range in.Networks[1:] {
-		if err := d.NetworkConnect(ctx, n, newID); err != nil {
-			_ = d.ContainerRemove(context.Background(), newID, true)
-			failed = false
-			_ = d.ContainerRename(context.Background(), id, old.Name)
-			if old.Running {
-				_ = d.ContainerAction(context.Background(), id, "start")
-			}
-			return "", old.Name, editFailure(http.StatusBadGateway, "network_attach_failed", err.Error())
+	desiredNetworks := networkSnapshotFromInput(in)
+	rollbackNew := func(code, msg string) (string, string, *containerEditFailure) {
+		_ = d.ContainerRemove(context.Background(), newID, true)
+		failed = false
+		warn := restoreOld()
+		if warn != "" {
+			msg += "; previous container restore warning: " + warn
 		}
+		return "", old.Name, editFailure(http.StatusBadGateway, code, msg)
+	}
+	if err := connectNetworkSnapshot(ctx, d, newID, desiredNetworks, true); err != nil {
+		return rollbackNew("network_attach_failed", err.Error())
 	}
 	shouldStart := old.Running || forceStart
 	if shouldStart {
 		if err := d.ContainerAction(ctx, newID, "start"); err != nil {
-			_ = d.ContainerRemove(context.Background(), newID, true)
-			failed = false
-			_ = d.ContainerRename(context.Background(), id, old.Name)
-			if old.Running {
-				_ = d.ContainerAction(context.Background(), id, "start")
-			}
-			return "", old.Name, editFailure(http.StatusBadGateway, "start_failed", "Replacement failed; previous container restored: "+err.Error())
+			return rollbackNew("start_failed", "Replacement failed: "+err.Error())
 		}
+	}
+	newRaw, err := d.ContainerInspect(ctx, newID)
+	if err != nil {
+		return rollbackNew("network_verify_failed", err.Error())
+	}
+	if err := verifyNetworkSnapshot(newRaw, desiredNetworks); err != nil {
+		return rollbackNew("network_verify_failed", "Replacement network identity verification failed: "+err.Error())
 	}
 	failed = false
 	_ = d.ContainerRemove(context.Background(), id, true)

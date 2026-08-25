@@ -115,6 +115,7 @@ type CreateContainerRequest struct {
 	Image            string                    `json:"Image"`
 	Cmd              []string                  `json:"Cmd,omitempty"`
 	Entrypoint       []string                  `json:"Entrypoint,omitempty"`
+	MacAddress       string                    `json:"MacAddress,omitempty"`
 	Env              []string                  `json:"Env,omitempty"`
 	WorkingDir       string                    `json:"WorkingDir,omitempty"`
 	Hostname         string                    `json:"Hostname,omitempty"`
@@ -175,12 +176,16 @@ type NetworkingConfig struct {
 }
 type EndpointSettings struct {
 	IPAMConfig *EndpointIPAMConfig `json:"IPAMConfig,omitempty"`
+	Links      []string            `json:"Links,omitempty"`
 	Aliases    []string            `json:"Aliases,omitempty"`
 	MacAddress string              `json:"MacAddress,omitempty"`
+	DriverOpts map[string]string   `json:"DriverOpts,omitempty"`
+	GwPriority int                 `json:"GwPriority,omitempty"`
 }
 type EndpointIPAMConfig struct {
-	IPv4Address string `json:"IPv4Address,omitempty"`
-	IPv6Address string `json:"IPv6Address,omitempty"`
+	IPv4Address  string   `json:"IPv4Address,omitempty"`
+	IPv6Address  string   `json:"IPv6Address,omitempty"`
+	LinkLocalIPs []string `json:"LinkLocalIPs,omitempty"`
 }
 type PortBinding struct {
 	HostIP   string `json:"HostIp,omitempty"`
