@@ -98,9 +98,11 @@ func (a *App) refreshDockerStorage(d *dockerx.Client) {
 }
 
 type containerStatsRow struct {
-	CPUPercent  float64 `json:"cpu_percent"`
-	MemoryBytes uint64  `json:"memory_bytes"`
-	MemoryLimit uint64  `json:"memory_limit"`
+	CPUPercent              float64 `json:"cpu_percent"`
+	MemoryBytes             uint64  `json:"memory_bytes"`
+	MemoryLimit             uint64  `json:"memory_limit"`
+	NetworkRXBytesPerSecond float64 `json:"network_rx_bytes_per_second"`
+	NetworkTXBytesPerSecond float64 `json:"network_tx_bytes_per_second"`
 }
 
 type containerStatsBatchResponse struct {
@@ -128,12 +130,19 @@ type dockerContainerStats struct {
 		Usage uint64 `json:"usage"`
 		Limit uint64 `json:"limit"`
 	} `json:"memory_stats"`
+	Networks map[string]struct {
+		RXBytes uint64 `json:"rx_bytes"`
+		TXBytes uint64 `json:"tx_bytes"`
+	} `json:"networks"`
 }
 
 type containerStatsCPUPoint struct {
-	Total  uint64
-	System uint64
-	CPUs   uint64
+	Total     uint64
+	System    uint64
+	CPUs      uint64
+	NetworkRX uint64
+	NetworkTX uint64
+	SampledAt time.Time
 }
 
 func containerStatsRowFromRaw(raw json.RawMessage) (containerStatsRow, bool) {
@@ -156,7 +165,13 @@ func containerStatsRowAndPoint(raw json.RawMessage, previous *containerStatsCPUP
 	if cpus == 0 {
 		cpus = 1
 	}
-	point := containerStatsCPUPoint{Total: s.CPUStats.CPUUsage.TotalUsage, System: s.CPUStats.SystemCPUUsage, CPUs: cpus}
+	var networkRX, networkTX uint64
+	for _, netStats := range s.Networks {
+		networkRX += netStats.RXBytes
+		networkTX += netStats.TXBytes
+	}
+	now := time.Now()
+	point := containerStatsCPUPoint{Total: s.CPUStats.CPUUsage.TotalUsage, System: s.CPUStats.SystemCPUUsage, CPUs: cpus, NetworkRX: networkRX, NetworkTX: networkTX, SampledAt: now}
 	baseTotal, baseSystem := s.PreCPUStats.CPUUsage.TotalUsage, s.PreCPUStats.SystemCPUUsage
 	if (baseTotal == 0 || baseSystem == 0) && previous != nil {
 		baseTotal, baseSystem = previous.Total, previous.System
@@ -172,7 +187,19 @@ func containerStatsRowAndPoint(raw json.RawMessage, previous *containerStatsCPUP
 	if baseSystem > 0 && cpuDelta > 0 && systemDelta > 0 {
 		cpu = cpuDelta / systemDelta * float64(cpus) * 100
 	}
-	return containerStatsRow{CPUPercent: cpu, MemoryBytes: s.MemoryStats.Usage, MemoryLimit: s.MemoryStats.Limit}, point, true
+	rxRate, txRate := float64(0), float64(0)
+	if previous != nil && !previous.SampledAt.IsZero() {
+		seconds := now.Sub(previous.SampledAt).Seconds()
+		if seconds > 0 {
+			if networkRX >= previous.NetworkRX {
+				rxRate = float64(networkRX-previous.NetworkRX) / seconds
+			}
+			if networkTX >= previous.NetworkTX {
+				txRate = float64(networkTX-previous.NetworkTX) / seconds
+			}
+		}
+	}
+	return containerStatsRow{CPUPercent: cpu, MemoryBytes: s.MemoryStats.Usage, MemoryLimit: s.MemoryStats.Limit, NetworkRXBytesPerSecond: rxRate, NetworkTXBytesPerSecond: txRate}, point, true
 }
 
 func (a *App) containerStatsBatch(w http.ResponseWriter, r *http.Request) {

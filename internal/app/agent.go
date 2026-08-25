@@ -675,6 +675,29 @@ func (a *App) agentTransport(ag store.Agent) (*http.Transport, error) {
 		}}, nil
 }
 
+func remoteResponseHeaderTimeout(method, path string) time.Duration {
+	clean := strings.Trim(strings.TrimSpace(path), "/")
+	segments := strings.Split(clean, "/")
+	if method == http.MethodDelete && len(segments) >= 2 && segments[0] == "images" {
+		return 15 * time.Minute
+	}
+	if method == http.MethodPost && len(segments) >= 2 {
+		if segments[0] == "images" && segments[1] == "pull" {
+			return 15 * time.Minute
+		}
+		if segments[0] == "projects" && len(segments) >= 3 {
+			switch segments[2] {
+			case "pull", "build", "up", "down", "restart", "restore":
+				return 15 * time.Minute
+			}
+		}
+		if segments[0] == "backups" {
+			return 15 * time.Minute
+		}
+	}
+	return 30 * time.Second
+}
+
 func (a *App) proxyAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("host")
 	ag, ok, err := a.db.AgentByID(id)
@@ -687,6 +710,7 @@ func (a *App) proxyAgent(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 500, "agent_transport_error", err.Error())
 		return
 	}
+	tr.ResponseHeaderTimeout = remoteResponseHeaderTimeout(r.Method, r.PathValue("path"))
 	target, _ := url.Parse(ag.URL)
 	actor := a.currentActor(r)
 	path := r.PathValue("path")

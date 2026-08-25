@@ -10,9 +10,9 @@ ZentContainer is an MIT-licensed Docker management UI by **ZentWorks** with a se
 
 - Manage containers, images, volumes and networks
 - Create and edit standalone containers
-- Live host and container CPU/RAM metrics
+- Live host and container CPU/RAM/network throughput metrics
 - Logs, terminal, processes, diagnostics and mounted-volume file access
-- Container groups across one or multiple Docker hosts
+- Container groups across one or multiple Docker hosts with aggregated live CPU/RAM/network throughput
 - Compose project management with editing, validation, logs and lifecycle controls
 - Image update checks and controlled container updates
 - Project and volume backup/restore

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.27
+  version: 0.6.29
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -91,8 +91,8 @@ paths:
     post: {summary: Create and start a standalone container, responses: {'201': {description: Created}}}
   /containers/stats:
     get:
-      summary: Get lightweight CPU/RAM stats for all running containers on this host
-      description: Uses one bounded per-host batch sample. Results are briefly cached/coalesced so the WebUI can refresh every five seconds without one browser request per container.
+      summary: Get lightweight CPU/RAM/network throughput stats for all running containers on this host
+      description: Uses one bounded per-host batch sample. CPU, RAM and per-container receive/transmit throughput are briefly cached/coalesced so the WebUI can refresh every five seconds without one browser request per container.
       responses:
         '200':
           description: Batch container stats
@@ -383,6 +383,8 @@ components:
               cpu_percent: {type: number, format: double, minimum: 0}
               memory_bytes: {type: integer, format: int64, minimum: 0}
               memory_limit: {type: integer, format: int64, minimum: 0}
+              network_rx_bytes_per_second: {type: number, format: double, minimum: 0, description: Receive throughput aggregated across container network interfaces}
+              network_tx_bytes_per_second: {type: number, format: double, minimum: 0, description: Transmit throughput aggregated across container network interfaces}
   securitySchemes:
     bearerAuth:
       type: http
