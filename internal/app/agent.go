@@ -213,6 +213,7 @@ func (a *App) agentResourceRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /agent/api/v1/containers/{id}", wrap(a.containerInspect))
 	m.HandleFunc("DELETE /agent/api/v1/containers/{id}", wrap(a.containerDelete))
 	m.HandleFunc("POST /agent/api/v1/containers/{id}/adopt", wrap(a.containerAdopt))
+	m.HandleFunc("GET /agent/api/v1/containers/{id}/update-progress", wrap(a.updateJobStatus))
 	m.HandleFunc("POST /agent/api/v1/containers/{id}/{action}", wrap(a.containerAction))
 	m.HandleFunc("GET /agent/api/v1/containers/{id}/logs", wrap(a.containerLogs))
 	m.HandleFunc("GET /agent/api/v1/containers/{id}/stats", wrap(a.containerStats))

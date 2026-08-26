@@ -386,6 +386,60 @@ func (c *Client) ImagePullAuth(ctx context.Context, ref, registryAuth string) ([
 	}
 	return c.rawHeaders(ctx, http.MethodPost, path, nil, nil, true, headers)
 }
+
+// ImagePullProgress streams Docker pull events while the image is downloaded.
+// The callback is invoked for every JSON progress record returned by Docker.
+type ImagePullProgressEvent struct {
+	Status         string `json:"status"`
+	ID             string `json:"id"`
+	Progress       string `json:"progress"`
+	Error          string `json:"error"`
+	ProgressDetail struct {
+		Current int64 `json:"current"`
+		Total   int64 `json:"total"`
+	} `json:"progressDetail"`
+}
+
+func (c *Client) ImagePullProgress(ctx context.Context, ref, registryAuth string, fn func(ImagePullProgressEvent)) error {
+	from, tag := splitImageRef(ref)
+	path := "/images/create?fromImage=" + url.QueryEscape(from)
+	if tag != "" {
+		path += "&tag=" + url.QueryEscape(tag)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker"+c.prefix(path), nil)
+	if err != nil {
+		return err
+	}
+	if registryAuth != "" {
+		req.Header.Set("X-Registry-Auth", registryAuth)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("docker POST %s: HTTP %d: %s", c.prefix(path), resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var ev ImagePullProgressEvent
+		if err := dec.Decode(&ev); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("decode docker pull progress: %w", err)
+		}
+		if fn != nil {
+			fn(ev)
+		}
+		if strings.TrimSpace(ev.Error) != "" {
+			return errors.New(ev.Error)
+		}
+	}
+}
+
 func splitImageRef(ref string) (string, string) {
 	if strings.Contains(ref, "@sha256:") {
 		return ref, ""

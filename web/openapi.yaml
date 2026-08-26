@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.31
+  version: 0.6.35
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -140,8 +140,22 @@ paths:
   /containers/{id}/{action}:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string}}
-      - {name: action, in: path, required: true, schema: {type: string, description: start|stop|restart|pause|unpause|kill|update-check|update|rollback}}
+      - {name: action, in: path, required: true, schema: {type: string, description: start|stop|restart|pause|unpause|kill|update-check|update|update-start|rollback}}
     post: {summary: Run a container action, responses: {'200': {description: OK}}}
+  /containers/{id}/update-progress:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: job_id, in: query, required: true, schema: {type: string}, description: ID returned by the update-start action}
+    get:
+      summary: Read server-side container update progress
+      description: Returns durable update job progress including Docker image pull layers, stop, network handoff, recreate, start, health verification and rollback state. The job runs on the target Controller or Agent and does not depend on one long-lived browser request.
+      responses:
+        '200':
+          description: Current update job state
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ContainerUpdateJob'}
+        '404': {description: Update job not found}
   /containers/{id}/logs:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get: {summary: Read container logs, responses: {'200': {description: OK}}}
@@ -357,6 +371,31 @@ paths:
     get: {summary: Download project files as a ZIP archive, responses: {'200': {description: Project ZIP}}}
 components:
   schemas:
+    ContainerUpdateJobStep:
+      type: object
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [waiting, running, done, error]}
+        message: {type: string}
+        percent: {type: integer, minimum: 0, maximum: 100}
+    ContainerUpdateJob:
+      type: object
+      properties:
+        id: {type: string}
+        container_id: {type: string}
+        container: {type: string}
+        status: {type: string, enum: [running, done, failed]}
+        percent: {type: integer, minimum: 0, maximum: 100}
+        step: {type: string}
+        message: {type: string}
+        error: {type: string}
+        backup: {type: string}
+        container_new_id: {type: string}
+        started_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: string, format: date-time, nullable: true}
+        steps: {type: array, items: {$ref: '#/components/schemas/ContainerUpdateJobStep'}}
+        pull_layers: {type: array, items: {$ref: '#/components/schemas/ContainerUpdateJobStep'}}
     ContainerNetworkConfig:
       type: object
       required: [name]

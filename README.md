@@ -15,13 +15,14 @@ ZentContainer is an MIT-licensed Docker management UI by **ZentWorks** with a se
 - Logs, terminal, processes, diagnostics and mounted-volume file access
 - Container groups across one or multiple Docker hosts with aggregated live CPU/RAM/network throughput
 - Compose project management with editing, validation, logs and lifecycle controls
-- Image update checks and controlled container updates
+- Image update checks and controlled container updates with live step-by-step progress
 - Project and volume backup/restore
 - Private registry credentials stored encrypted
 - Controller/Agent mode for remote Docker hosts using TLS 1.3 + mTLS
 - Scoped API keys
 - Built-in API Explorer and OpenAPI specification
 - German and English WebUI/documentation
+- Responsive installable Web App for desktop and mobile browsers
 
 ## Installation
 
@@ -94,6 +95,12 @@ docker logs zentcontainer
 Enter the `ZCL1-...` code in the WebUI and choose **Controller** or **Agent**.
 
 > If you use another persistent data path, keep the host and container path identical so Compose bind mounts resolve correctly from the Docker daemon.
+
+## Install as a Web App
+
+ZentContainer can be installed from supported browsers and opens in its own app window. Chrome/Edge on desktop and Android can offer the install action directly; Safari on iPhone/iPad uses **Share → Add to Home Screen**.
+
+For full PWA installation and service-worker support, serve ZentContainer from a secure HTTPS origin (or localhost). Live API/session responses are never cached.
 
 ## Controller and Agent
 
