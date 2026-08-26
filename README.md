@@ -109,7 +109,7 @@ A **Controller** manages its local Docker Engine and provides the full WebUI and
 
 An **Agent** lets a Controller manage another Docker host. The Controller must be able to reach the Agent on TCP `9444`. Pairing uses a one-time code, certificate pinning, TLS 1.3 and mutual TLS.
 
-ZentContainer can update itself and paired Agents directly from the WebUI. Compose installations are updated through their Compose source when available; Docker-run, Unraid, Portainer and other Docker-created installations use an exact Docker recreation path that preserves the running configuration and rolls back automatically if the replacement does not become healthy. Paired Agents additionally require the Controller to reconnect over mTLS before their update is committed.
+ZentContainer can update itself and paired Agents directly from the WebUI. The active Controller/Agent container can also be updated from **Containers -> More -> Check for updates**; ZentContainer automatically routes that exact self container to the safe self-update path. Compose installations are updated through their Compose source when available; Docker-run, Unraid, Portainer and other Docker-created installations use an exact Docker recreation path that preserves the running configuration and rolls back automatically if the replacement does not become healthy. Paired Agents additionally require the Controller to reconnect over mTLS before their update is committed.
 
 ## API
 

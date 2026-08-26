@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.40
+  version: 0.6.41
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
