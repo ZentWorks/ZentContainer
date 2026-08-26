@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.39
+  version: 0.6.40
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -35,7 +35,7 @@ paths:
         '404': {description: Update job not found}
   /settings:
     get:
-      summary: Get runtime update, rollback and scheduled image-check settings
+      summary: Get runtime update and scheduled image-check settings
       responses:
         '200':
           description: Runtime settings
@@ -43,7 +43,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/RuntimeSettings'}
     put:
-      summary: Update runtime update, rollback and scheduled image-check settings
+      summary: Update runtime update and scheduled image-check settings
       requestBody:
         required: true
         content:
@@ -217,7 +217,7 @@ paths:
       - {name: job_id, in: query, required: true, schema: {type: string}, description: ID returned by the update-start action}
     get:
       summary: Read server-side container update progress
-      description: Returns durable update job progress including Docker image pull layers, stop, network handoff, recreate, start, health verification and rollback state. The job runs on the target Controller or Agent and does not depend on one long-lived browser request.
+      description: Returns durable update job progress including Docker image pull layers, temporary rollback backup creation, stop/network handoff, recreate, start, health verification, automatic rollback and successful backup cleanup. The job runs on the target Controller or Agent and does not depend on one long-lived browser request.
       responses:
         '200':
           description: Current update job state
@@ -450,7 +450,6 @@ components:
         update_scan_timezone: {type: string, description: IANA timezone name or Local}
         update_scan_jitter_minutes: {type: integer, minimum: 0, maximum: 14, readOnly: true, description: Stable per-host registry staggering applied after the configured time}
         last_update_scan: {type: integer, format: int64, readOnly: true, description: Unix timestamp of the last completed manual or scheduled scan}
-        rollback_retention_hours: {type: integer, minimum: 1, maximum: 720}
         health_timeout_seconds: {type: integer, minimum: 10, maximum: 600}
     RuntimeSettingsInput:
       type: object
@@ -460,7 +459,6 @@ components:
         update_scan_hour: {type: integer, minimum: 0, maximum: 23}
         update_scan_minute: {type: integer, minimum: 0, maximum: 59}
         update_scan_timezone: {type: string}
-        rollback_retention_hours: {type: integer, minimum: 1, maximum: 720}
         health_timeout_seconds: {type: integer, minimum: 10, maximum: 600}
     UpdateScanResult:
       type: object

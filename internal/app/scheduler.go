@@ -22,18 +22,16 @@ type runtimeSettings struct {
 	UpdateScanTimezone      string `json:"update_scan_timezone"`
 	UpdateScanJitterMinutes int    `json:"update_scan_jitter_minutes"`
 	LastUpdateScan          int64  `json:"last_update_scan"`
-	RollbackRetentionHours  int    `json:"rollback_retention_hours"`
 	HealthTimeoutSeconds    int    `json:"health_timeout_seconds"`
 }
 
 type runtimeSettingsInput struct {
-	UpdateScanEnabled      *bool   `json:"update_scan_enabled"`
-	UpdateScanWeekday      *int    `json:"update_scan_weekday"`
-	UpdateScanHour         *int    `json:"update_scan_hour"`
-	UpdateScanMinute       *int    `json:"update_scan_minute"`
-	UpdateScanTimezone     *string `json:"update_scan_timezone"`
-	RollbackRetentionHours *int    `json:"rollback_retention_hours"`
-	HealthTimeoutSeconds   *int    `json:"health_timeout_seconds"`
+	UpdateScanEnabled    *bool   `json:"update_scan_enabled"`
+	UpdateScanWeekday    *int    `json:"update_scan_weekday"`
+	UpdateScanHour       *int    `json:"update_scan_hour"`
+	UpdateScanMinute     *int    `json:"update_scan_minute"`
+	UpdateScanTimezone   *string `json:"update_scan_timezone"`
+	HealthTimeoutSeconds *int    `json:"health_timeout_seconds"`
 	// Accepted for one release cycle so a stale pre-v0.6.38 WebUI cannot
 	// accidentally reset the new weekly schedule. It is intentionally ignored.
 	UpdateIntervalHours *int `json:"update_interval_hours"`
@@ -67,7 +65,7 @@ func (a *App) getRuntimeSettings() runtimeSettings {
 	s := runtimeSettings{
 		UpdateScanEnabled: true, UpdateScanWeekday: 0, UpdateScanHour: 3, UpdateScanMinute: 0,
 		UpdateScanTimezone: "Local", UpdateScanJitterMinutes: stableUpdateJitter(name),
-		RollbackRetentionHours: 24, HealthTimeoutSeconds: 60,
+		HealthTimeoutSeconds: 60,
 	}
 	if v, ok, _ := a.db.GetSetting("update_scan_enabled"); ok {
 		s.UpdateScanEnabled = boolSetting(v, true)
@@ -92,11 +90,6 @@ func (a *App) getRuntimeSettings() runtimeSettings {
 	}
 	if v, ok, _ := a.db.GetSetting("last_update_scan"); ok {
 		s.LastUpdateScan, _ = strconv.ParseInt(v, 10, 64)
-	}
-	if v, ok, _ := a.db.GetSetting("rollback_retention_hours"); ok {
-		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 720 {
-			s.RollbackRetentionHours = n
-		}
 	}
 	if v, ok, _ := a.db.GetSetting("health_timeout_seconds"); ok {
 		if n, err := strconv.Atoi(v); err == nil && n >= 10 && n <= 600 {
@@ -155,9 +148,6 @@ func (a *App) settingsPut(w http.ResponseWriter, r *http.Request) {
 	if in.UpdateScanTimezone != nil {
 		current.UpdateScanTimezone = strings.TrimSpace(*in.UpdateScanTimezone)
 	}
-	if in.RollbackRetentionHours != nil {
-		current.RollbackRetentionHours = *in.RollbackRetentionHours
-	}
 	if in.HealthTimeoutSeconds != nil {
 		current.HealthTimeoutSeconds = *in.HealthTimeoutSeconds
 	}
@@ -176,10 +166,6 @@ func (a *App) settingsPut(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 400, "invalid_timezone", "Update scan timezone is invalid")
 		return
 	}
-	if current.RollbackRetentionHours < 1 || current.RollbackRetentionHours > 720 {
-		errorJSON(w, 400, "invalid_retention", "Rollback retention must be between 1 and 720 hours")
-		return
-	}
 	if current.HealthTimeoutSeconds < 10 || current.HealthTimeoutSeconds > 600 {
 		errorJSON(w, 400, "invalid_health_timeout", "Health timeout must be between 10 and 600 seconds")
 		return
@@ -189,7 +175,6 @@ func (a *App) settingsPut(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.SetSetting("update_scan_hour", strconv.Itoa(current.UpdateScanHour))
 	_ = a.db.SetSetting("update_scan_minute", strconv.Itoa(current.UpdateScanMinute))
 	_ = a.db.SetSetting("update_scan_timezone", current.UpdateScanTimezone)
-	_ = a.db.SetSetting("rollback_retention_hours", strconv.Itoa(current.RollbackRetentionHours))
 	_ = a.db.SetSetting("health_timeout_seconds", strconv.Itoa(current.HealthTimeoutSeconds))
 	if original.UpdateScanEnabled != current.UpdateScanEnabled || original.UpdateScanWeekday != current.UpdateScanWeekday || original.UpdateScanHour != current.UpdateScanHour || original.UpdateScanMinute != current.UpdateScanMinute || original.UpdateScanTimezone != current.UpdateScanTimezone {
 		_ = a.db.SetSetting("update_scan_schedule_anchor", strconv.FormatInt(time.Now().Unix(), 10))
@@ -247,9 +232,6 @@ func (a *App) schedulerTick() {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	a.cleanupRollbackBackups(ctx, s.RollbackRetentionHours)
-	cancel()
 }
 
 func (a *App) preserveKnownUpdateOnCheckError(v store.UpdateCheck) {
@@ -426,37 +408,4 @@ func (a *App) updateScan(w http.ResponseWriter, r *http.Request) {
 	_ = a.db.SetSetting("last_update_scan", strconv.FormatInt(res.CheckedAt, 10))
 	a.db.AddAudit(a.currentActor(r), "updates.scan", "containers", "checked="+strconv.Itoa(res.Checked)+" updates="+strconv.Itoa(res.Updates)+" errors="+strconv.Itoa(res.Errors))
 	writeJSON(w, res)
-}
-
-func (a *App) cleanupRollbackBackups(ctx context.Context, retentionHours int) {
-	d, err := a.docker()
-	if err != nil {
-		return
-	}
-	containers, err := d.Containers(ctx, true)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().Add(-time.Duration(retentionHours) * time.Hour).Unix()
-	for _, c := range containers {
-		if !isBackup(c) || c.Created >= cutoff {
-			continue
-		}
-		imageID := c.ImageID
-		if err := d.ContainerRemove(ctx, c.ID, true); err != nil {
-			continue
-		}
-		a.db.AddAudit("system", "rollback.cleanup", c.ID, "")
-		remaining, _ := d.Containers(ctx, true)
-		used := false
-		for _, rc := range remaining {
-			if rc.ImageID == imageID {
-				used = true
-				break
-			}
-		}
-		if !used && imageID != "" {
-			_ = d.ImageRemove(ctx, imageID, false)
-		}
-	}
 }

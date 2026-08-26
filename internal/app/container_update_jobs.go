@@ -73,7 +73,7 @@ type updateProgress func(step, status, message string, percent int, pull *docker
 
 func newUpdateJob(id, containerID string) *updateJob {
 	j := &updateJob{ID: id, ContainerID: containerID, Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()}
-	for _, id := range []string{"inspect", "pull", "stop", "network", "recreate", "restore_network", "start", "health", "rollback", "complete"} {
+	for _, id := range []string{"inspect", "pull", "stop", "backup", "network", "recreate", "restore_network", "start", "health", "rollback", "cleanup", "complete"} {
 		j.Steps = append(j.Steps, updateJobStep{ID: id, Status: "waiting"})
 	}
 	return j
@@ -134,6 +134,12 @@ func (j *updateJob) finish(res updateResult, err error) {
 	now := time.Now()
 	j.UpdatedAt = now
 	j.FinishedAt = &now
+	if res.ContainerID != "" {
+		j.NewID = res.ContainerID
+	}
+	if res.Backup != "" {
+		j.Backup = res.Backup
+	}
 	if err != nil {
 		j.Status = "failed"
 		j.Error = err.Error()
@@ -289,12 +295,14 @@ func (a *App) performContainerUpdate(ctx context.Context, id, actor string, prog
 		set("stop", "done", "Container already stopped", 43)
 	}
 	backup := "zc-backup-" + safeName(name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+	set("backup", "running", "Creating temporary rollback container", 44)
 	if err := d.ContainerRename(ctx, id, backup); err != nil {
 		if running {
 			_ = d.ContainerAction(context.Background(), id, "start")
 		}
 		return updateResult{}, updateFail(502, "backup_failed", err.Error())
 	}
+	set("backup", "done", "Temporary rollback container ready", 45)
 	restoreOld := func() string {
 		parts := []string{}
 		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -409,9 +417,17 @@ func (a *App) performContainerUpdate(ctx context.Context, id, actor string, prog
 	} else {
 		set("health", "done", "Health check not required", 98)
 	}
+	set("rollback", "done", "Rollback not required", 98)
+	set("cleanup", "running", "Removing temporary rollback container", 99)
+	if err := d.ContainerRemove(ctx, id, true); err != nil {
+		set("cleanup", "error", "Temporary rollback container could not be removed: "+err.Error(), -1)
+		a.db.AddAudit(actor, "container.update.cleanup_failed", name, "backup="+backup+" | "+err.Error())
+		return updateResult{ContainerID: newID, Backup: backup}, updateFail(502, "backup_cleanup_failed", "Update installed successfully, but the temporary rollback container could not be removed: "+err.Error())
+	}
+	set("cleanup", "done", "Temporary rollback container removed", 99)
 	_ = a.db.DeleteUpdateCheck(id)
 	_ = a.db.UpsertUpdateCheck(store.UpdateCheck{ResourceID: newID, ImageRef: imageRef, Status: "current", CheckedAt: time.Now().Unix()})
-	a.db.AddAudit(actor, "container.update", name, "backup="+backup)
+	a.db.AddAudit(actor, "container.update", name, "temporary rollback removed")
 	set("complete", "done", "Update completed", 100)
-	return updateResult{ContainerID: newID, Backup: backup}, nil
+	return updateResult{ContainerID: newID}, nil
 }

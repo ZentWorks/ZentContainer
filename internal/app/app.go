@@ -1633,7 +1633,7 @@ func (a *App) containerUpdate(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 502, "update_failed", err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "container_id": res.ContainerID, "rollback_available": true, "backup": res.Backup})
+	writeJSON(w, map[string]any{"ok": true, "container_id": res.ContainerID, "rollback_available": false})
 }
 
 func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
