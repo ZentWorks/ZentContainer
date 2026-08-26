@@ -69,6 +69,8 @@ type App struct {
 	pairingMu                sync.Mutex
 	updateJobsMu             sync.Mutex
 	updateJobs               map[string]*updateJob
+	updateScanMu             sync.Mutex
+	updateScanRunning        bool
 }
 
 type cachedSession struct {
@@ -169,11 +171,14 @@ func (a *App) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/logout", authNoStore(a.require(a.logout)))
 	m.HandleFunc("GET /api/me", authNoStore(a.require(a.me)))
 	m.HandleFunc("GET /api/v1/system", a.requireController(a.system))
+	m.HandleFunc("POST /api/v1/system/self-update", a.requireController(a.controllerSelfUpdate))
+	m.HandleFunc("GET /api/v1/system/self-update-status", a.requireController(a.controllerSelfUpdateStatus))
 	m.HandleFunc("GET /api/v1/settings", a.requireController(a.settingsGet))
 	m.HandleFunc("PUT /api/v1/settings", a.requireController(a.settingsPut))
 	m.HandleFunc("PUT /api/v1/account/password", authNoStore(a.requireController(a.changePassword)))
 	m.HandleFunc("PUT /api/v1/account/language", authNoStore(a.requireController(a.accountLanguage)))
 	m.HandleFunc("GET /api/v1/dashboard", a.requireController(a.dashboard))
+	m.HandleFunc("POST /api/v1/update-scan", a.requireController(a.updateScan))
 	m.HandleFunc("GET /api/v1/host-metrics", a.requireController(a.hostMetrics))
 	m.HandleFunc("GET /api/v1/hosts", a.requireController(a.hosts))
 	m.HandleFunc("GET /api/v1/hardware/devices", a.requireController(a.hardwareDevices))
@@ -189,6 +194,8 @@ func (a *App) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/backups/{id}/download", a.requireController(a.backupDownload))
 	m.HandleFunc("POST /api/v1/hosts/pair", a.requireController(a.pairAgent))
 	m.HandleFunc("DELETE /api/v1/hosts/{id}", a.requireController(a.removeAgent))
+	m.HandleFunc("POST /api/v1/hosts/{id}/agent-update", a.requireController(a.controllerAgentSelfUpdate))
+	m.HandleFunc("GET /api/v1/hosts/{id}/agent-update-status", a.requireController(a.controllerAgentSelfUpdateStatus))
 	m.HandleFunc("/api/v1/hosts/{host}/proxy/{path...}", a.requireController(a.proxyAgent))
 	m.HandleFunc("GET /api/v1/groups", a.requireController(a.groupsList))
 	m.HandleFunc("POST /api/v1/groups", a.requireController(a.groupCreate))
@@ -830,7 +837,14 @@ func resourceRequiredScopes(method, path string, query url.Values) []string {
 	}
 	seg := strings.Split(clean, "/")
 	switch seg[0] {
+	case "update-scan":
+		if method == http.MethodPost {
+			return []string{"containers.read", "images.read"}
+		}
 	case "system", "dashboard", "host-metrics", "hosts", "events":
+		if seg[0] == "system" && len(seg) > 1 {
+			return []string{"admin"}
+		}
 		if seg[0] == "hosts" && len(seg) > 1 {
 			return []string{"admin"}
 		}
@@ -1148,6 +1162,11 @@ func (a *App) system(w http.ResponseWriter, r *http.Request) {
 	d, err := a.docker()
 	data := map[string]any{"version": version.Version, "role": a.db.Role(), "instance_name": name, "docker_connected": err == nil, "docker_error": a.dockerErr, "data_dir": a.cfg.DataDir}
 	if d != nil {
+		if id, _, e := a.selfContainerInspect(r.Context(), d); e == nil {
+			data["self_container_id"] = id
+		}
+	}
+	if d != nil {
 		data["docker_api"] = d.APIVersion
 	}
 	writeJSON(w, data)
@@ -1190,13 +1209,24 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	checks, _ := a.db.ListUpdateChecks()
+	activeIDs := map[string]bool{}
+	for _, c := range cs {
+		if !isBackup(c) {
+			activeIDs[c.ID] = true
+		}
+	}
 	updates := 0
+	activeChecks := make([]store.UpdateCheck, 0, len(checks))
 	for _, c := range checks {
+		if !activeIDs[c.ResourceID] {
+			continue
+		}
+		activeChecks = append(activeChecks, c)
 		if c.Status == "update_available" {
 			updates++
 		}
 	}
-	writeJSON(w, map[string]any{"containers": map[string]int{"running": running, "stopped": stopped, "total": running + stopped}, "images": len(imgs), "volumes": len(vols), "networks": len(nets), "updates": updates, "update_checks": checks, "info": info, "storage": storage})
+	writeJSON(w, map[string]any{"containers": map[string]int{"running": running, "stopped": stopped, "total": running + stopped}, "images": len(imgs), "volumes": len(vols), "networks": len(nets), "updates": updates, "update_checks": activeChecks, "info": info, "storage": storage})
 }
 
 const hostMetricsFreshFor = 4 * time.Second
@@ -1345,6 +1375,11 @@ func (a *App) containers(w http.ResponseWriter, r *http.Request) {
 	for _, p := range pendingRows {
 		pending[p.Name] = true
 	}
+	checks, _ := a.db.ListUpdateChecks()
+	checkByID := make(map[string]store.UpdateCheck, len(checks))
+	for _, check := range checks {
+		checkByID[check.ResourceID] = check
+	}
 	out := make([]dockerx.ContainerSummary, 0, len(v))
 	for _, c := range v {
 		if !isBackup(c) {
@@ -1354,6 +1389,10 @@ func (a *App) containers(w http.ResponseWriter, r *http.Request) {
 					c.Labels = map[string]string{}
 				}
 				c.Labels["io.zentcontainer.pending-edit"] = "true"
+			}
+			if check, ok := checkByID[c.ID]; ok {
+				c.ZentContainerUpdateStatus = check.Status
+				c.ZentContainerUpdateCheckedAt = check.CheckedAt
 			}
 			out = append(out, c)
 		}
@@ -1676,31 +1715,39 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	temp := "zc-failed-" + safeName(name) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
 	if err := d.ContainerRename(ctx, id, temp); err != nil {
-		_ = connectMissingNetworkSnapshot(context.Background(), d, id, currentNetworks)
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = ensureNetworkSnapshot(bg, d, id, currentNetworks, false)
 		if cur.State.Running {
-			_ = d.ContainerAction(context.Background(), id, "start")
+			if d.ContainerAction(bg, id, "start") == nil {
+				_ = ensureNetworkSnapshot(bg, d, id, currentNetworks, true)
+			}
 		}
 		errorJSON(w, 502, "rollback_failed", err.Error())
 		return
 	}
 	restoreCurrent := func() string {
 		parts := []string{}
-		_ = d.ContainerAction(context.Background(), old.ID, "stop")
-		_ = disconnectNetworkSnapshot(context.Background(), d, old.ID, rollbackNetworks)
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = d.ContainerAction(bg, old.ID, "stop")
+		_ = disconnectNetworkSnapshot(bg, d, old.ID, rollbackNetworks)
 		if backupName != "" {
-			if err := d.ContainerRename(context.Background(), old.ID, backupName); err != nil {
+			if err := d.ContainerRename(bg, old.ID, backupName); err != nil {
 				parts = append(parts, "backup rename: "+err.Error())
 			}
 		}
-		if err := d.ContainerRename(context.Background(), id, name); err != nil {
+		if err := d.ContainerRename(bg, id, name); err != nil {
 			parts = append(parts, "current rename: "+err.Error())
 		}
-		if err := connectMissingNetworkSnapshot(context.Background(), d, id, currentNetworks); err != nil {
+		if err := ensureNetworkSnapshot(bg, d, id, currentNetworks, false); err != nil {
 			parts = append(parts, "current network restore: "+err.Error())
 		}
 		if cur.State.Running {
-			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+			if err := d.ContainerAction(bg, id, "start"); err != nil {
 				parts = append(parts, "current start: "+err.Error())
+			} else if err := ensureNetworkSnapshot(bg, d, id, currentNetworks, true); err != nil {
+				parts = append(parts, "current network verify: "+err.Error())
 			}
 		}
 		return strings.Join(parts, "; ")
@@ -1714,7 +1761,7 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 502, "rollback_failed", msg)
 		return
 	}
-	if err := connectMissingNetworkSnapshot(ctx, d, old.ID, rollbackNetworks); err != nil {
+	if err := ensureNetworkSnapshot(ctx, d, old.ID, rollbackNetworks, false); err != nil {
 		warn := restoreCurrent()
 		msg := "Could not restore rollback network identity: " + err.Error()
 		if warn != "" {
@@ -1733,20 +1780,15 @@ func (a *App) containerRollback(w http.ResponseWriter, r *http.Request) {
 			errorJSON(w, 502, "rollback_failed", msg)
 			return
 		}
-	}
-	oldRaw, inspectErr := d.ContainerInspect(ctx, old.ID)
-	if inspectErr != nil || verifyNetworkSnapshot(oldRaw, rollbackNetworks) != nil {
-		verifyErr := inspectErr
-		if verifyErr == nil {
-			verifyErr = verifyNetworkSnapshot(oldRaw, rollbackNetworks)
+		if err := ensureNetworkSnapshot(ctx, d, old.ID, rollbackNetworks, true); err != nil {
+			warn := restoreCurrent()
+			msg := "Rollback network identity verification failed after start: " + err.Error()
+			if warn != "" {
+				msg += "; restore warning: " + warn
+			}
+			errorJSON(w, 502, "rollback_failed", msg)
+			return
 		}
-		warn := restoreCurrent()
-		msg := "Rollback network identity verification failed: " + verifyErr.Error()
-		if warn != "" {
-			msg += "; restore warning: " + warn
-		}
-		errorJSON(w, 502, "rollback_failed", msg)
-		return
 	}
 	_ = d.ContainerRemove(ctx, id, true)
 	if cur.Image != "" {
@@ -2655,15 +2697,73 @@ func (a *App) activity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, v)
 }
 
+func (a *App) selfContainerInspect(ctx context.Context, d *dockerx.Client) (string, []byte, error) {
+	host, _ := os.Hostname()
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", nil, errors.New("container hostname unavailable")
+	}
+	// With Docker's default hostname the hostname is the container-ID prefix, so
+	// this fast path resolves the running ZentContainer without listing anything.
+	if raw, err := d.ContainerInspect(ctx, host); err == nil {
+		var x struct {
+			ID     string `json:"Id"`
+			Config struct {
+				Hostname string `json:"Hostname"`
+			} `json:"Config"`
+		}
+		if json.Unmarshal(raw, &x) == nil && strings.TrimSpace(x.ID) != "" && strings.TrimSpace(x.Config.Hostname) == host {
+			return strings.TrimSpace(x.ID), raw, nil
+		}
+	}
+	// Compose and docker run may set an explicit hostname. Docker Inspect cannot
+	// address a container by Config.Hostname, so resolve that case explicitly.
+	items, err := d.Containers(ctx, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("cannot enumerate containers while locating ZentContainer: %w", err)
+	}
+	type candidate struct {
+		id  string
+		raw []byte
+	}
+	var matches []candidate
+	for _, c := range items {
+		raw, err := d.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			continue
+		}
+		var x struct {
+			ID     string `json:"Id"`
+			Config struct {
+				Hostname string `json:"Hostname"`
+			} `json:"Config"`
+		}
+		if json.Unmarshal(raw, &x) != nil || strings.TrimSpace(x.Config.Hostname) != host {
+			continue
+		}
+		id := strings.TrimSpace(x.ID)
+		if id == "" {
+			id = strings.TrimSpace(c.ID)
+		}
+		matches = append(matches, candidate{id: id, raw: raw})
+	}
+	if len(matches) == 1 {
+		return matches[0].id, matches[0].raw, nil
+	}
+	if len(matches) > 1 {
+		return "", nil, fmt.Errorf("cannot identify ZentContainer uniquely: %d containers use hostname %q", len(matches), host)
+	}
+	return "", nil, fmt.Errorf("cannot determine ZentContainer container from hostname %q; run ZentContainer as a Docker container", host)
+}
+
 func (a *App) helperImage(ctx context.Context) (string, error) {
 	d, err := a.docker()
 	if err != nil {
 		return "", err
 	}
-	host, _ := os.Hostname()
-	raw, err := d.ContainerInspect(ctx, host)
+	_, raw, err := a.selfContainerInspect(ctx, d)
 	if err != nil {
-		return "", fmt.Errorf("cannot determine ZentContainer image; run ZentContainer as a Docker container: %w", err)
+		return "", err
 	}
 	var v struct {
 		Image string `json:"Image"`
@@ -2869,6 +2969,11 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 func writeRawJSON(w http.ResponseWriter, v []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(v)
+}
+func writeRawJSONStatus(w http.ResponseWriter, status int, v []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(v)
 }
 func errorJSON(w http.ResponseWriter, status int, code, msg string) {
 	writeJSONStatus(w, status, map[string]any{"error": map[string]any{"code": code, "message": msg}})

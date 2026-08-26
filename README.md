@@ -15,10 +15,11 @@ ZentContainer is an MIT-licensed Docker management UI by **ZentWorks** with a se
 - Logs, terminal, processes, diagnostics and mounted-volume file access
 - Container groups across one or multiple Docker hosts with aggregated live CPU/RAM/network throughput
 - Compose project management with editing, validation, logs and lifecycle controls
-- Image update checks and controlled container updates with live step-by-step progress
+- Scheduled and manual image update checks with persistent update markers, plus controlled container updates with live step-by-step progress
 - Project and volume backup/restore
 - Private registry credentials stored encrypted
 - Controller/Agent mode for remote Docker hosts using TLS 1.3 + mTLS
+- Self-update for the Controller and paired Agents, including Compose and standalone Docker installations
 - Scoped API keys
 - Built-in API Explorer and OpenAPI specification
 - German and English WebUI/documentation
@@ -107,6 +108,8 @@ For full PWA installation and service-worker support, serve ZentContainer from a
 A **Controller** manages its local Docker Engine and provides the full WebUI and REST API.
 
 An **Agent** lets a Controller manage another Docker host. The Controller must be able to reach the Agent on TCP `9444`. Pairing uses a one-time code, certificate pinning, TLS 1.3 and mutual TLS.
+
+ZentContainer can update itself and paired Agents directly from the WebUI. Compose installations are updated through their Compose source when available; Docker-run, Unraid, Portainer and other Docker-created installations use an exact Docker recreation path that preserves the running configuration and rolls back automatically if the replacement does not become healthy. Paired Agents additionally require the Controller to reconnect over mTLS before their update is committed.
 
 ## API
 

@@ -37,7 +37,9 @@ type ContainerSummary struct {
 	NetworkSettings struct {
 		Networks map[string]Endpoint `json:"Networks"`
 	} `json:"NetworkSettings"`
-	Mounts []Mount `json:"Mounts"`
+	Mounts                       []Mount `json:"Mounts"`
+	ZentContainerUpdateStatus    string  `json:"ZentContainerUpdateStatus,omitempty"`
+	ZentContainerUpdateCheckedAt int64   `json:"ZentContainerUpdateCheckedAt,omitempty"`
 }
 type Port struct {
 	IP          string `json:"IP"`

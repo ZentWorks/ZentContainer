@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.35
+  version: 0.6.39
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -12,9 +12,44 @@ paths:
     get: {summary: Download this bundled OpenAPI document, security: [], responses: {'200': {description: OpenAPI YAML}}}
   /system:
     get: {summary: Get system status, responses: {'200': {description: OK}}}
+  /system/self-update:
+    post:
+      summary: Safely update this ZentContainer Controller while preserving its Docker installation model and configuration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image: {type: string, default: ghcr.io/zentworks/zentcontainer:latest}
+      responses:
+        '200': {description: Controller already uses the requested image}
+        '202': {description: Controller self-update helper started}
+        '409': {description: Persistent data is missing or another self-update is running}
+  /system/self-update-status:
+    get:
+      summary: Read the local ZentContainer Controller self-update helper status after restart
+      parameters: [{name: job_id, in: query, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: Controller self-update state}
+        '404': {description: Update job not found}
   /settings:
-    get: {summary: Get runtime update settings, responses: {'200': {description: OK}}}
-    put: {summary: Update runtime update settings, responses: {'200': {description: OK}}}
+    get:
+      summary: Get runtime update, rollback and scheduled image-check settings
+      responses:
+        '200':
+          description: Runtime settings
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RuntimeSettings'}
+    put:
+      summary: Update runtime update, rollback and scheduled image-check settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RuntimeSettingsInput'}
+      responses: {'200': {description: Updated settings}}
   /account/password:
     put: {summary: Change the interactive Controller administrator password and revoke other browser sessions, responses: {'200': {description: Changed}, '403': {description: Interactive administrator session/current password required}}}
   /account/language:
@@ -30,6 +65,16 @@ paths:
               properties:
                 language: {type: string, enum: [de, en]}
       responses: {'200': {description: Language preference saved}, '403': {description: Interactive browser session required}}
+  /update-scan:
+    post:
+      summary: Check every container image on this Docker host for available updates without installing anything
+      responses:
+        '200':
+          description: Completed scan summary; successful checks persist update markers for the container list
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UpdateScanResult'}
+        '409': {description: Another update scan is already running}
   /dashboard:
     get:
       summary: Get dashboard, cached Docker storage usage and update status
@@ -51,6 +96,30 @@ paths:
   /hosts/{id}:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     delete: {summary: Unpair/remove a remote Agent, responses: {'200': {description: OK}}}
+  /hosts/{id}/agent-update:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      summary: Update a paired ZentContainer Agent in Compose or standalone mode
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image: {type: string, default: ghcr.io/zentworks/zentcontainer:latest}
+      responses:
+        '200': {description: Agent already uses the requested image}
+        '202': {description: Agent self-update started; commit requires replacement-image verification and Controller mTLS reconnect}
+        '409': {description: Installation metadata is incomplete or Compose source is unavailable}
+  /hosts/{id}/agent-update-status:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: job_id, in: query, required: true, schema: {type: string}}
+    get:
+      summary: Read the current Agent self-update helper status after reconnect
+      responses:
+        '200': {description: Agent update state; successful replacement is acknowledged only after Controller mTLS reconnect}
+        '503': {description: Agent is currently restarting or unreachable}
   /hosts/{host}/proxy/{path}:
     parameters:
       - {name: host, in: path, required: true, schema: {type: string}}
@@ -371,6 +440,38 @@ paths:
     get: {summary: Download project files as a ZIP archive, responses: {'200': {description: Project ZIP}}}
 components:
   schemas:
+    RuntimeSettings:
+      type: object
+      properties:
+        update_scan_enabled: {type: boolean}
+        update_scan_weekday: {type: integer, minimum: 0, maximum: 6, description: 0=Sunday through 6=Saturday}
+        update_scan_hour: {type: integer, minimum: 0, maximum: 23}
+        update_scan_minute: {type: integer, minimum: 0, maximum: 59}
+        update_scan_timezone: {type: string, description: IANA timezone name or Local}
+        update_scan_jitter_minutes: {type: integer, minimum: 0, maximum: 14, readOnly: true, description: Stable per-host registry staggering applied after the configured time}
+        last_update_scan: {type: integer, format: int64, readOnly: true, description: Unix timestamp of the last completed manual or scheduled scan}
+        rollback_retention_hours: {type: integer, minimum: 1, maximum: 720}
+        health_timeout_seconds: {type: integer, minimum: 10, maximum: 600}
+    RuntimeSettingsInput:
+      type: object
+      properties:
+        update_scan_enabled: {type: boolean}
+        update_scan_weekday: {type: integer, minimum: 0, maximum: 6}
+        update_scan_hour: {type: integer, minimum: 0, maximum: 23}
+        update_scan_minute: {type: integer, minimum: 0, maximum: 59}
+        update_scan_timezone: {type: string}
+        rollback_retention_hours: {type: integer, minimum: 1, maximum: 720}
+        health_timeout_seconds: {type: integer, minimum: 10, maximum: 600}
+    UpdateScanResult:
+      type: object
+      properties:
+        checked: {type: integer, minimum: 0}
+        updates: {type: integer, minimum: 0}
+        current: {type: integer, minimum: 0}
+        pinned: {type: integer, minimum: 0}
+        unknown: {type: integer, minimum: 0}
+        errors: {type: integer, minimum: 0}
+        checked_at: {type: integer, format: int64}
     ContainerUpdateJobStep:
       type: object
       properties:

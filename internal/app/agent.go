@@ -190,9 +190,12 @@ func (a *App) startAgentServer() {
 func (a *App) agentResourceRoutes(m *http.ServeMux) {
 	wrap := a.agentRequireMTLS
 	m.HandleFunc("GET /agent/api/v1/system", wrap(a.system))
+	m.HandleFunc("POST /agent/api/v1/self-update", wrap(a.agentSelfUpdate))
+	m.HandleFunc("GET /agent/api/v1/self-update-status", wrap(a.agentSelfUpdateStatus))
 	m.HandleFunc("GET /agent/api/v1/settings", wrap(a.settingsGet))
 	m.HandleFunc("PUT /agent/api/v1/settings", wrap(a.settingsPut))
 	m.HandleFunc("GET /agent/api/v1/dashboard", wrap(a.dashboard))
+	m.HandleFunc("POST /agent/api/v1/update-scan", wrap(a.updateScan))
 	m.HandleFunc("GET /agent/api/v1/host-metrics", wrap(a.hostMetrics))
 	m.HandleFunc("GET /agent/api/v1/hardware/devices", wrap(a.hardwareDevices))
 	m.HandleFunc("GET /agent/api/v1/resources/map", wrap(a.resourceMap))
@@ -633,6 +636,8 @@ func (a *App) agentRequest(ctx context.Context, ag store.Agent, method, path str
 	if err != nil {
 		return nil, err
 	}
+	cleanPath := strings.TrimPrefix(path, "/agent/api/v1/")
+	tr.ResponseHeaderTimeout = remoteResponseHeaderTimeout(method, cleanPath)
 	client := &http.Client{Transport: tr}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(ag.URL, "/")+path, body)
 	if err != nil {
@@ -679,6 +684,9 @@ func (a *App) agentTransport(ag store.Agent) (*http.Transport, error) {
 func remoteResponseHeaderTimeout(method, path string) time.Duration {
 	clean := strings.Trim(strings.TrimSpace(path), "/")
 	segments := strings.Split(clean, "/")
+	if method == http.MethodPost && (clean == "self-update" || clean == "update-scan") {
+		return 15 * time.Minute
+	}
 	if method == http.MethodDelete && len(segments) >= 2 && segments[0] == "images" {
 		return 15 * time.Minute
 	}
@@ -768,6 +776,9 @@ func (a *App) probeAgent(ctx context.Context, ag store.Agent) (map[string]any, e
 		return nil, err
 	}
 	a.db.TouchAgent(ag.ID)
+	if ver := strings.TrimSpace(fmt.Sprint(v["version"])); ver != "" {
+		_ = a.db.SetAgentVersion(ag.ID, ver)
+	}
 	return v, nil
 }
 

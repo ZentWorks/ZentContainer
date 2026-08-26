@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Entry struct {
@@ -32,8 +33,23 @@ func Run(args []string) error {
 	if args[0] == "hardware" {
 		return runHardware()
 	}
+	if args[0] == "compose-check" {
+		return runComposeCheck(args[1:])
+	}
 	if args[0] == "compose-image" {
 		return runComposeImage(args[1:])
+	}
+	if args[0] == "self-update-compose" {
+		return runSelfUpdateCompose(args[1:])
+	}
+	if args[0] == "self-update-controller-compose" {
+		return runControllerSelfUpdateCompose(args[1:])
+	}
+	if args[0] == "self-update-standalone" {
+		return runSelfUpdateStandalone(args[1:])
+	}
+	if args[0] == "self-update-controller-standalone" {
+		return runControllerSelfUpdateStandalone(args[1:])
 	}
 	if len(args) < 2 || args[0] != "fs" {
 		return errors.New("usage: helper fs <list|delete|mkdir|size|clear> [path]")
@@ -174,7 +190,48 @@ func strconvQuoteYAML(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\\`, `\\\\`), `"`, `\\"`) + `"`
 }
 
-func runComposeImage(args []string) error {
+func runComposeCheck(args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: helper compose-check <service> <compose-file> [compose-file...]")
+	}
+	service := strings.TrimSpace(args[0])
+	if service == "" {
+		return errors.New("compose service is required")
+	}
+	for _, raw := range args[1:] {
+		rel := filepath.Clean(raw)
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return errors.New("unsafe compose file path")
+		}
+		data, err := os.ReadFile(filepath.Join("/workspace", rel))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", rel, err)
+		}
+		if _, ok := composeServiceImageReplace(data, service, "__zc_probe_image__"); ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("service %s has no editable image entry in the Compose source", service)
+}
+
+func runSelfUpdateCompose(args []string) error { return runSelfUpdateComposeMode(args, true) }
+func runControllerSelfUpdateCompose(args []string) error {
+	return runSelfUpdateComposeMode(args, false)
+}
+func runSelfUpdateComposeMode(args []string, requireControllerAck bool) error {
+	if len(args) < 5 {
+		return errors.New("usage: helper self-update-compose <project> <service> <image> <rollback-image-id> <compose-file> [compose-file...]")
+	}
+	time.Sleep(2 * time.Second)
+	rollbackImageID := strings.TrimSpace(args[3])
+	composeArgs := append([]string{}, args[:3]...)
+	composeArgs = append(composeArgs, args[4:]...)
+	return runComposeImageMode(composeArgs, true, rollbackImageID, requireControllerAck)
+}
+
+func runComposeImage(args []string) error { return runComposeImageMode(args, false, "", false) }
+
+func runComposeImageMode(args []string, selfUpdate bool, rollbackImageID string, requireControllerAck bool) error {
 	if len(args) < 4 {
 		return errors.New("usage: helper compose-image <project> <service> <image> <compose-file> [compose-file...]")
 	}
@@ -212,7 +269,39 @@ func runComposeImage(args []string) error {
 	for _, f := range files {
 		composeArgs = append(composeArgs, "-f", filepath.Join("/workspace", filepath.Clean(f)))
 	}
-	composeArgs = append(composeArgs, "up", "-d", service)
+	if selfUpdate {
+		composeArgs = append(composeArgs, "up", "-d", "--no-deps", "--no-build", "--force-recreate", service)
+	} else {
+		composeArgs = append(composeArgs, "up", "-d", service)
+	}
+	rollbackCompose := func(reason error) error {
+		if writeErr := os.WriteFile(target, original, 0644); writeErr != nil {
+			return fmt.Errorf("%v; additionally could not restore Compose source: %w", reason, writeErr)
+		}
+		if selfUpdate && strings.TrimSpace(rollbackImageID) != "" {
+			// Pulling :latest moves the tag before Compose recreates the service.
+			// Restore the previous image behind the requested reference before
+			// re-applying the original Compose source.
+			if tagErr := exec.Command("docker", "image", "tag", rollbackImageID, image).Run(); tagErr != nil {
+				return fmt.Errorf("%v; Compose source restored but previous Agent image could not be retagged: %w", reason, tagErr)
+			}
+		}
+		rollback := exec.Command("docker", composeArgs...)
+		rollback.Dir = "/workspace"
+		rbOut, rbErr := rollback.CombinedOutput()
+		if len(rbOut) > 0 {
+			_, _ = os.Stdout.Write(rbOut)
+		}
+		if rbErr != nil {
+			msg := strings.TrimSpace(string(rbOut))
+			if msg != "" {
+				return fmt.Errorf("%v; automatic Compose rollback failed: %w: %s", reason, rbErr, msg)
+			}
+			return fmt.Errorf("%v; automatic Compose rollback failed: %w", reason, rbErr)
+		}
+		return reason
+	}
+
 	cmd := exec.Command("docker", composeArgs...)
 	cmd.Dir = "/workspace"
 	out, err := cmd.CombinedOutput()
@@ -220,11 +309,25 @@ func runComposeImage(args []string) error {
 		_, _ = os.Stdout.Write(out)
 	}
 	if err != nil {
-		_ = os.WriteFile(target, original, 0644)
-		rollback := exec.Command("docker", composeArgs...)
-		rollback.Dir = "/workspace"
-		_, _ = rollback.CombinedOutput()
-		return fmt.Errorf("docker compose up failed; source restored: %w", err)
+		return rollbackCompose(fmt.Errorf("docker compose up failed: %w", err))
+	}
+	if selfUpdate {
+		// A successful Compose CLI exit is not enough for self-update. The new
+		// Agent must first be the requested image, running/healthy, and then be
+		// reached by the paired Controller over mTLS. If either check fails, restore
+		// both the original Compose source and previous Agent image automatically.
+		if err := waitComposeServiceReady(project, service, image, 90*time.Second); err != nil {
+			return rollbackCompose(err)
+		}
+		if requireControllerAck {
+			if err := waitSelfUpdateAck(6 * time.Minute); err != nil {
+				return rollbackCompose(err)
+			}
+		} else {
+			if err := waitComposeControllerReady(project, service, image, 90*time.Second); err != nil {
+				return rollbackCompose(err)
+			}
+		}
 	}
 	return nil
 }

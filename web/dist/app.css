@@ -153,3 +153,6 @@
  .groupCardTools .btn[data-group-edit]:after{content:"✎";font-size:14px}
  .groupTrafficTotal{font-size:9.5px}
 }
+
+/* v0.6.38 scheduled update checks + persistent update markers */
+.containerUpdateMark{display:inline-grid;place-items:center;width:17px;height:17px;margin-left:7px;border-radius:999px;border:1px solid #4c5f91;background:#18213a;color:#aebcff;font-size:11px;line-height:1;vertical-align:middle}.containerRow.hasUpdate>td:first-child{box-shadow:inset 2px 0 0 #6677c7}.updateScheduleGrid{display:grid;grid-template-columns:1fr 150px;gap:10px}.updateScanToggle{margin:2px 0 4px}.runtimeSettings select{width:100%;border:1px solid var(--line);background:#0e1117;color:var(--text);border-radius:9px;padding:9px 10px;outline:none}.runtimeSettings input[type="time"]{width:100%}@media(max-width:620px){.updateScheduleGrid{grid-template-columns:1fr}.containerUpdateMark{width:16px;height:16px}}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ZentWorks/ZentContainer/internal/dockerx"
+	"github.com/ZentWorks/ZentContainer/internal/store"
 )
 
 type updateJobStep struct {
@@ -296,15 +297,19 @@ func (a *App) performContainerUpdate(ctx context.Context, id, actor string, prog
 	}
 	restoreOld := func() string {
 		parts := []string{}
-		if err := d.ContainerRename(context.Background(), id, name); err != nil {
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := d.ContainerRename(bg, id, name); err != nil {
 			parts = append(parts, "rename: "+err.Error())
 		}
-		if err := connectMissingNetworkSnapshot(context.Background(), d, id, networkSnapshot); err != nil {
+		if err := ensureNetworkSnapshot(bg, d, id, networkSnapshot, false); err != nil {
 			parts = append(parts, "network restore: "+err.Error())
 		}
 		if running {
-			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+			if err := d.ContainerAction(bg, id, "start"); err != nil {
 				parts = append(parts, "start: "+err.Error())
+			} else if err := ensureNetworkSnapshot(bg, d, id, networkSnapshot, true); err != nil {
+				parts = append(parts, "network verify: "+err.Error())
 			}
 		}
 		return strings.Join(parts, "; ")
@@ -375,29 +380,27 @@ func (a *App) performContainerUpdate(ctx context.Context, id, actor string, prog
 		}
 		return updateFail(502, code, message)
 	}
-	set("restore_network", "running", "Restoring network identity", 70)
-	if err := connectNetworkSnapshot(ctx, d, newID, networkSnapshot, true); err != nil {
-		return updateResult{}, rollbackNew("restore_network", "network_restore_failed", "Replacement could not restore all networks: "+err.Error())
+	set("restore_network", "running", "Staging network identity", 70)
+	if err := ensureNetworkSnapshot(ctx, d, newID, networkSnapshot, false); err != nil {
+		return updateResult{}, rollbackNew("restore_network", "network_restore_failed", "Replacement could not stage its network identity: "+err.Error())
 	}
-	newRaw, err := d.ContainerInspect(ctx, newID)
-	if err != nil {
-		return updateResult{}, rollbackNew("restore_network", "network_verify_failed", "Replacement could not be inspected after recreate: "+err.Error())
-	}
-	if err := verifyNetworkSnapshot(newRaw, networkSnapshot); err != nil {
-		return updateResult{}, rollbackNew("restore_network", "network_verify_failed", "Replacement network identity verification failed: "+err.Error())
-	}
-	set("restore_network", "done", "Network identity restored", 80)
+	set("restore_network", "done", "Network identity staged", 78)
 	if running {
-		set("start", "running", "Starting container", 82)
+		set("start", "running", "Starting container", 80)
 		if err := d.ContainerAction(ctx, newID, "start"); err != nil {
 			return updateResult{}, rollbackNew("start", "start_failed", "New container failed; old container restored: "+err.Error())
 		}
-		set("start", "done", "Container started", 88)
+		set("start", "done", "Container started", 86)
+		set("restore_network", "running", "Verifying network identity after start", 87)
+		if err := ensureNetworkSnapshot(ctx, d, newID, networkSnapshot, true); err != nil {
+			return updateResult{}, rollbackNew("restore_network", "network_verify_failed", "Replacement network identity verification failed after start: "+err.Error())
+		}
+		set("restore_network", "done", "Network identity verified", 91)
 	} else {
 		set("start", "done", "Container remains stopped", 88)
 	}
 	if running {
-		set("health", "running", "Checking container health", 90)
+		set("health", "running", "Checking container health", 92)
 		ht := time.Duration(a.getRuntimeSettings().HealthTimeoutSeconds) * time.Second
 		if err := waitContainerHealthy(ctx, d, newID, ht); err != nil {
 			return updateResult{}, rollbackNew("health", "healthcheck_failed", "New container failed health verification; previous container restored: "+err.Error())
@@ -406,6 +409,8 @@ func (a *App) performContainerUpdate(ctx context.Context, id, actor string, prog
 	} else {
 		set("health", "done", "Health check not required", 98)
 	}
+	_ = a.db.DeleteUpdateCheck(id)
+	_ = a.db.UpsertUpdateCheck(store.UpdateCheck{ResourceID: newID, ImageRef: imageRef, Status: "current", CheckedAt: time.Now().Unix()})
 	a.db.AddAudit(actor, "container.update", name, "backup="+backup)
 	set("complete", "done", "Update completed", 100)
 	return updateResult{ContainerID: newID, Backup: backup}, nil

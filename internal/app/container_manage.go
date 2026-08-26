@@ -725,18 +725,14 @@ func (a *App) createManagedContainer(ctx context.Context, in containerInput, pul
 		}
 	}()
 	desiredNetworks := networkSnapshotFromInput(in)
-	if err := connectNetworkSnapshot(ctx, d, id, desiredNetworks, true); err != nil {
-		return "", err
-	}
-	raw, err := d.ContainerInspect(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if err := verifyNetworkSnapshot(raw, desiredNetworks); err != nil {
-		return "", fmt.Errorf("verify network identity: %w", err)
+	if err := ensureNetworkSnapshot(ctx, d, id, desiredNetworks, false); err != nil {
+		return "", fmt.Errorf("stage network identity: %w", err)
 	}
 	if err := d.ContainerAction(ctx, id, "start"); err != nil {
 		return "", err
+	}
+	if err := ensureNetworkSnapshot(ctx, d, id, desiredNetworks, true); err != nil {
+		return "", fmt.Errorf("verify network identity after start: %w", err)
 	}
 	cleanup = false
 	return id, nil
@@ -884,15 +880,19 @@ func (a *App) recreateEditableContainer(ctx context.Context, id string, in conta
 	}
 	restoreOld := func() string {
 		parts := []string{}
-		if err := d.ContainerRename(context.Background(), id, old.Name); err != nil {
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := d.ContainerRename(bg, id, old.Name); err != nil {
 			parts = append(parts, "rename: "+err.Error())
 		}
-		if err := connectMissingNetworkSnapshot(context.Background(), d, id, old.NetworkSnapshot); err != nil {
+		if err := ensureNetworkSnapshot(bg, d, id, old.NetworkSnapshot, false); err != nil {
 			parts = append(parts, "network restore: "+err.Error())
 		}
 		if old.Running {
-			if err := d.ContainerAction(context.Background(), id, "start"); err != nil {
+			if err := d.ContainerAction(bg, id, "start"); err != nil {
 				parts = append(parts, "start: "+err.Error())
+			} else if err := ensureNetworkSnapshot(bg, d, id, old.NetworkSnapshot, true); err != nil {
+				parts = append(parts, "network verify: "+err.Error())
 			}
 		}
 		return strings.Join(parts, "; ")
@@ -938,21 +938,17 @@ func (a *App) recreateEditableContainer(ctx context.Context, id string, in conta
 		}
 		return "", old.Name, editFailure(http.StatusBadGateway, code, msg)
 	}
-	if err := connectNetworkSnapshot(ctx, d, newID, desiredNetworks, true); err != nil {
-		return rollbackNew("network_attach_failed", err.Error())
+	if err := ensureNetworkSnapshot(ctx, d, newID, desiredNetworks, false); err != nil {
+		return rollbackNew("network_attach_failed", "Replacement could not stage its network identity: "+err.Error())
 	}
 	shouldStart := old.Running || forceStart
 	if shouldStart {
 		if err := d.ContainerAction(ctx, newID, "start"); err != nil {
 			return rollbackNew("start_failed", "Replacement failed: "+err.Error())
 		}
-	}
-	newRaw, err := d.ContainerInspect(ctx, newID)
-	if err != nil {
-		return rollbackNew("network_verify_failed", err.Error())
-	}
-	if err := verifyNetworkSnapshot(newRaw, desiredNetworks); err != nil {
-		return rollbackNew("network_verify_failed", "Replacement network identity verification failed: "+err.Error())
+		if err := ensureNetworkSnapshot(ctx, d, newID, desiredNetworks, true); err != nil {
+			return rollbackNew("network_verify_failed", "Replacement network identity verification failed after start: "+err.Error())
+		}
 	}
 	failed = false
 	_ = d.ContainerRemove(context.Background(), id, true)

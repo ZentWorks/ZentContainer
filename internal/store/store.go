@@ -607,6 +607,28 @@ ON CONFLICT(resource_id) DO UPDATE SET image_ref=excluded.image_ref,current_dige
 		q(v.ResourceID), q(v.ImageRef), q(v.CurrentDigest), q(v.RemoteDigest), q(v.Status), v.CheckedAt))
 }
 
+func (s *Store) UpdateCheckByResourceID(resourceID string) (UpdateCheck, bool, error) {
+	out, err := s.run("SELECT resource_id,image_ref,current_digest,remote_digest,status,checked_at FROM update_checks WHERE resource_id=" + q(resourceID) + " LIMIT 1;")
+	if err != nil {
+		return UpdateCheck{}, false, err
+	}
+	var v []UpdateCheck
+	if len(out) == 0 {
+		return UpdateCheck{}, false, nil
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return UpdateCheck{}, false, err
+	}
+	if len(v) == 0 {
+		return UpdateCheck{}, false, nil
+	}
+	return v[0], true, nil
+}
+
+func (s *Store) DeleteUpdateCheck(resourceID string) error {
+	return s.exec("DELETE FROM update_checks WHERE resource_id=" + q(resourceID) + ";")
+}
+
 func (s *Store) ListUpdateChecks() ([]UpdateCheck, error) {
 	out, err := s.run("SELECT resource_id,image_ref,current_digest,remote_digest,status,checked_at FROM update_checks ORDER BY checked_at DESC;")
 	if err != nil {
@@ -744,4 +766,8 @@ func (s *Store) IsContainerAdopted(name string) bool {
 }
 func (s *Store) ForgetAdoptedContainer(name string) error {
 	return s.exec("DELETE FROM adopted_containers WHERE name=" + q(name) + ";")
+}
+
+func (s *Store) SetAgentVersion(id, version string) error {
+	return s.exec(fmt.Sprintf("UPDATE agents SET version=%s,last_seen_at=%d WHERE id=%s;", q(version), time.Now().Unix(), q(id)))
 }
