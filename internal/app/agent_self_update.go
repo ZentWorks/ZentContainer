@@ -20,6 +20,13 @@ import (
 
 const defaultAgentUpdateImage = "ghcr.io/zentworks/zentcontainer:latest"
 
+func composeRecreateFallbackAllowed(currentImage, targetImage string) bool {
+	// Docker Compose records source paths from the Compose client's point of
+	// view. If those paths cannot be mounted by the daemon, exact recreation is
+	// safe only when the image reference itself stays unchanged.
+	return strings.TrimSpace(currentImage) != "" && strings.TrimSpace(currentImage) == strings.TrimSpace(targetImage)
+}
+
 type agentSelfUpdateRequest struct {
 	Image string `json:"image,omitempty"`
 }
@@ -166,6 +173,7 @@ func (a *App) agentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	var ci struct {
 		Image  string `json:"Image"`
 		Config struct {
+			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
 		Mounts []struct {
@@ -206,13 +214,23 @@ func (a *App) agentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		mode = "compose"
 		workingDir, files, err = composeConfigPaths(labels)
-		if err != nil {
-			errorJSON(w, 409, "compose_source_unavailable", err.Error())
-			return
+		if err == nil {
+			err = a.composeSelfUpdatePreflight(ctx, workingDir, service, files)
 		}
-		if err := a.composeSelfUpdatePreflight(ctx, workingDir, service, files); err != nil {
-			errorJSON(w, 409, "compose_source_unavailable", err.Error())
-			return
+		if err != nil {
+			// Docker Compose labels describe paths as seen by the Compose client.
+			// When Compose itself ran in another container/UI those paths can be
+			// valid there but impossible for the Docker daemon to bind-mount. If
+			// the image reference itself is unchanged, safely fall back to the exact
+			// inspect-based recreation. The freshly pulled tag remains the Compose
+			// source of truth for a later `compose up`.
+			if !composeRecreateFallbackAllowed(ci.Config.Image, image) {
+				errorJSON(w, 409, "compose_source_unavailable", "Compose source is not reachable from the Docker host and the requested image reference differs from the Compose service. Update the Compose source or use the same image reference.")
+				return
+			}
+			mode = "compose-recreate"
+			workingDir = ""
+			files = nil
 		}
 	}
 	if err := d.ImagePullProgress(ctx, image, a.registryAuthForImage(image), nil); err != nil {

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.41
+  version: 0.6.42
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -110,7 +110,7 @@ paths:
       responses:
         '200': {description: Agent already uses the requested image}
         '202': {description: Agent self-update started; commit requires replacement-image verification and Controller mTLS reconnect}
-        '409': {description: Installation metadata is incomplete or Compose source is unavailable}
+        '409': {description: Installation metadata is incomplete, or an unreachable Compose source prevents a safe image-reference change}
   /hosts/{id}/agent-update-status:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string}}

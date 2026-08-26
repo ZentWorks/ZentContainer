@@ -67,6 +67,7 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	var ci struct {
 		Image  string `json:"Image"`
 		Config struct {
+			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
 		Mounts []struct{ Type, Destination string } `json:"Mounts"`
@@ -99,14 +100,23 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	workingDir := ""
 	files := []string{}
 	if project != "" && service != "" {
-		if wd, fs, e := composeConfigPaths(labels); e == nil && a.composeSelfUpdatePreflight(ctx, wd, service, fs) == nil {
+		wd, fs, sourceErr := composeConfigPaths(labels)
+		if sourceErr == nil {
+			sourceErr = a.composeSelfUpdatePreflight(ctx, wd, service, fs)
+		}
+		if sourceErr == nil {
 			mode = "compose"
 			workingDir = wd
 			files = fs
+		} else if composeRecreateFallbackAllowed(ci.Config.Image, image) {
+			// Compose client paths may not exist on the Docker host (for example
+			// when Compose was launched by another container/UI). Recreate from the
+			// exact inspect data only when the image reference itself is unchanged.
+			mode = "compose-recreate"
+		} else {
+			errorJSON(w, 409, "compose_source_unavailable", "Compose source is not reachable from the Docker host and the requested image reference differs from the Compose service. Update the Compose source or use the same image reference.")
+			return
 		}
-		// If the original Compose source cannot be reached, fall back to exact
-		// Docker recreation. This keeps ZentContainer self-manageable even when
-		// it was created by a UI/orchestrator that does not expose its source.
 	}
 	if err := d.ImagePullProgress(ctx, image, a.registryAuthForImage(image), nil); err != nil {
 		errorJSON(w, 502, "controller_update_pull_failed", err.Error())
