@@ -353,6 +353,10 @@ func (a *App) agentSelfUpdateStatus(w http.ResponseWriter, r *http.Request) {
 			msg = "Controller reconnected over mTLS to the replacement Agent; finalizing update"
 		}
 	} else {
+		// A completed helper is no longer needed once this status request has
+		// captured its exit code and output. Remove it on both success and failure
+		// so zc-agent-update-* does not linger in Docker/Unraid.
+		defer func() { _ = d.ContainerRemove(context.Background(), id, true) }()
 		if x.State.ExitCode == 0 {
 			status = "done"
 			msg = "Agent update helper completed"

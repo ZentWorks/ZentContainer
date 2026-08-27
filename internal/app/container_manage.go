@@ -65,6 +65,14 @@ type containerInput struct {
 	User                string                  `json:"user"`
 	Command             string                  `json:"command"`
 	CommandArgs         []string                `json:"commandArgs,omitempty"`
+	Entrypoint          []string                `json:"entrypoint,omitempty"`
+	Labels              map[string]string       `json:"labels,omitempty"`
+	CapAdd              []string                `json:"capAdd,omitempty"`
+	CapDrop             []string                `json:"capDrop,omitempty"`
+	SecurityOpt         []string                `json:"securityOpt,omitempty"`
+	Privileged          bool                    `json:"privileged,omitempty"`
+	ReadonlyRootfs      bool                    `json:"readonlyRootfs,omitempty"`
+	AutoRemove          bool                    `json:"autoRemove,omitempty"`
 	MemoryMB            int64                   `json:"memoryMB"`
 	MemoryReservationMB int64                   `json:"memoryReservationMB"`
 	MemorySwapMB        int64                   `json:"memorySwapMB"`
@@ -279,6 +287,20 @@ func normalizeContainerInput(in *containerInput) error {
 	in.Hostname = strings.TrimSpace(in.Hostname)
 	in.User = strings.TrimSpace(in.User)
 	in.CPUSet = strings.TrimSpace(in.CPUSet)
+	in.CapAdd = cleanStringList(in.CapAdd)
+	in.CapDrop = cleanStringList(in.CapDrop)
+	in.SecurityOpt = cleanStringList(in.SecurityOpt)
+	if in.Labels == nil {
+		in.Labels = map[string]string{}
+	}
+	cleanLabels := make(map[string]string, len(in.Labels))
+	for k, v := range in.Labels {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			cleanLabels[k] = v
+		}
+	}
+	in.Labels = cleanLabels
 	in.StaticIPv4 = strings.TrimSpace(in.StaticIPv4)
 	in.StaticIPv6 = strings.TrimSpace(in.StaticIPv6)
 	if err := validateContainerName(in.Name); err != nil {
@@ -294,6 +316,9 @@ func normalizeContainerInput(in *containerInput) error {
 	if !allowedRestart[in.Restart] {
 		return errors.New("invalid restart policy")
 	}
+	if in.AutoRemove && in.Restart != "no" {
+		return errors.New("auto-remove cannot be combined with an automatic restart policy")
+	}
 	if len(in.Networks) == 0 && strings.TrimSpace(in.Network) != "" {
 		in.Networks = []string{strings.TrimSpace(in.Network)}
 	}
@@ -307,6 +332,13 @@ func normalizeContainerInput(in *containerInput) error {
 		}
 	}
 	in.Networks = cleanNets
+	if len(in.Networks) > 1 {
+		for _, name := range in.Networks {
+			if name == "host" || name == "none" {
+				return fmt.Errorf("network %s cannot be combined with additional networks", name)
+			}
+		}
+	}
 	in.MACAddress = strings.TrimSpace(in.MACAddress)
 	if len(in.Networks) == 0 && (in.StaticIPv4 != "" || in.StaticIPv6 != "" || in.MACAddress != "" || len(in.NetworkAliases) > 0 || len(in.NetworkConfigs) > 0) {
 		return errors.New("network identity settings require at least one network")
@@ -323,6 +355,11 @@ func normalizeContainerInput(in *containerInput) error {
 		}
 		if !selected[cfg.Name] {
 			return fmt.Errorf("network configuration references unselected network %s", cfg.Name)
+		}
+		if cfg.Name == "host" || cfg.Name == "none" {
+			if strings.TrimSpace(cfg.IPv4) != "" || strings.TrimSpace(cfg.IPv6) != "" || strings.TrimSpace(cfg.MACAddress) != "" || len(cleanStringList(cfg.Aliases)) > 0 || len(cleanStringList(cfg.LinkLocalIPs)) > 0 || len(cleanStringList(cfg.Links)) > 0 || len(cfg.DriverOpts) > 0 || cfg.GwPriority != 0 {
+				return fmt.Errorf("network %s does not support endpoint identity settings", cfg.Name)
+			}
 		}
 		if _, exists := configs[cfg.Name]; exists {
 			return fmt.Errorf("duplicate network configuration for %s", cfg.Name)
@@ -581,8 +618,13 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 	if len(cmd) == 0 && strings.TrimSpace(in.Command) != "" {
 		cmd = strings.Fields(in.Command)
 	}
-	labels := map[string]string{"io.zentcontainer.managed": "true", "io.zentcontainer.created-by": "zentcontainer"}
-	hc := dockerx.HostConfig{Binds: binds, PortBindings: pb, RestartPolicy: dockerx.RestartPolicy{Name: in.Restart}, NetworkMode: networkMode, CpusetCpus: in.CPUSet, CpuShares: in.CPUShares, PidsLimit: in.PidsLimit, Dns: in.DNS}
+	labels := make(map[string]string, len(in.Labels)+2)
+	for k, v := range in.Labels {
+		labels[k] = v
+	}
+	labels["io.zentcontainer.managed"] = "true"
+	labels["io.zentcontainer.created-by"] = "zentcontainer"
+	hc := dockerx.HostConfig{Binds: binds, PortBindings: pb, RestartPolicy: dockerx.RestartPolicy{Name: in.Restart}, NetworkMode: networkMode, CpusetCpus: in.CPUSet, CpuShares: in.CPUShares, PidsLimit: in.PidsLimit, Dns: in.DNS, CapAdd: append([]string(nil), in.CapAdd...), CapDrop: append([]string(nil), in.CapDrop...), SecurityOpt: append([]string(nil), in.SecurityOpt...), Privileged: in.Privileged, ReadonlyRootfs: in.ReadonlyRootfs, AutoRemove: in.AutoRemove}
 	if in.MemoryMB > 0 {
 		hc.Memory = in.MemoryMB * 1024 * 1024
 	}
@@ -608,7 +650,7 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 	if in.GPUAll {
 		hc.DeviceRequests = []dockerx.DeviceRequest{{Driver: "", Count: -1, Capabilities: [][]string{{"gpu"}}}}
 	}
-	req := dockerx.CreateContainerRequest{Image: in.Image, Cmd: cmd, Env: env, WorkingDir: in.WorkingDir, Hostname: in.Hostname, User: in.User, Labels: labels, ExposedPorts: exp, Healthcheck: healthConfig(in.Health), HostConfig: hc}
+	req := dockerx.CreateContainerRequest{Image: in.Image, Cmd: cmd, Entrypoint: append([]string(nil), in.Entrypoint...), Env: env, WorkingDir: in.WorkingDir, Hostname: in.Hostname, User: in.User, Labels: labels, ExposedPorts: exp, Healthcheck: healthConfig(in.Health), HostConfig: hc}
 	if networkMode != "" {
 		if cfg, ok := networkConfigMap(in)[networkMode]; ok {
 			endpoint := endpointSettingsFromInput(cfg)

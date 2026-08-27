@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.42
+  version: 0.6.46
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -519,8 +519,16 @@ components:
         workingDir: {type: string}
         hostname: {type: string}
         user: {type: string}
-        command: {type: string}
+        command: {type: string, description: Human-readable command; commandArgs preserves exact argument boundaries when supplied}
         commandArgs: {type: array, items: {type: string}}
+        entrypoint: {type: array, items: {type: string}, description: Optional Docker entrypoint override}
+        labels: {type: object, additionalProperties: {type: string}, description: User labels; reserved io.zentcontainer.* management labels are enforced by the server}
+        capAdd: {type: array, items: {type: string}}
+        capDrop: {type: array, items: {type: string}}
+        securityOpt: {type: array, items: {type: string}}
+        privileged: {type: boolean, default: false}
+        readonlyRootfs: {type: boolean, default: false}
+        autoRemove: {type: boolean, default: false}
         memoryMB: {type: integer, format: int64, minimum: 0}
         memoryReservationMB: {type: integer, format: int64, minimum: 0}
         memorySwapMB: {type: integer, format: int64, minimum: 0}
@@ -529,16 +537,58 @@ components:
         cpuShares: {type: integer, format: int64, minimum: 0}
         pidsLimit: {type: integer, format: int64, minimum: 0}
         env: {type: object, additionalProperties: {type: string}}
-        networks: {type: array, items: {type: string}}
+        ports:
+          type: array
+          items:
+            type: object
+            properties:
+              host: {type: string}
+              container: {type: string}
+              protocol: {type: string, enum: [tcp, udp, sctp]}
+              hostIP: {type: string}
+        volumes:
+          type: array
+          items:
+            type: object
+            properties:
+              source: {type: string}
+              target: {type: string}
+              readOnly: {type: boolean}
+        networks: {type: array, items: {type: string}, description: Ordered Docker network selection. The first item is primary; host and none are exclusive and cannot be combined with additional networks.}
         networkConfigs:
           type: array
-          description: Per-network IP/MAC/alias identity. A selected network omitted here keeps its current identity on edit for backward-compatible API clients.
+          description: Per-network IP/MAC/alias identity. A selected network omitted here keeps its current identity on edit for backward-compatible API clients. Endpoint identity settings are invalid for host and none.
           items: {$ref: '#/components/schemas/ContainerNetworkConfig'}
         staticIPv4: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
         staticIPv6: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
         macAddress: {type: string, deprecated: true, description: Legacy primary-network field; use networkConfigs}
         networkAliases: {type: array, deprecated: true, items: {type: string}, description: Legacy primary-network field; use networkConfigs}
         dns: {type: array, items: {type: string}}
+        extraHosts:
+          type: array
+          items:
+            type: object
+            properties:
+              host: {type: string}
+              address: {type: string}
+        devices:
+          type: array
+          items:
+            type: object
+            properties:
+              host: {type: string}
+              container: {type: string}
+              permissions: {type: string}
+        gpuAll: {type: boolean}
+        health:
+          type: object
+          properties:
+            type: {type: string, enum: [none, http, tcp, command]}
+            value: {type: string}
+            intervalSec: {type: integer, format: int64, minimum: 0}
+            timeoutSec: {type: integer, format: int64, minimum: 0}
+            retries: {type: integer, minimum: 0}
+            startSec: {type: integer, format: int64, minimum: 0}
     ContainerGroupMember:
       type: object
       required: [host_id, container_name]

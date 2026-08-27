@@ -17,3 +17,7 @@ Please use GitHub Private Vulnerability Reporting for the ZentWorks/ZentContaine
 ## Agent self-update
 
 Agent self-update is accepted only over the authenticated Controller/Agent mTLS channel. A short-lived updater helper receives Docker socket access only for the replacement operation; reachable Compose source access is scoped to the Agent service update. Compose paths stored in Docker labels may be local to the Compose client and unavailable to the Docker host; in that case ZentContainer permits exact inspect-based recreation only when the configured image reference is unchanged, avoiding silent divergence from an inaccessible Compose definition. The replacement is committed only after the Controller reconnects over mTLS to the new container running the exact pulled image; otherwise ZentContainer automatically rolls back.
+
+## Docker Run import
+
+Pasted `docker run` text is parsed into the structured container form and is never passed to a shell. Shell chaining, backticks and command substitution are rejected. Unsupported Docker options are shown to the user instead of being silently executed or discarded; creation still goes through ZentContainer's authenticated preflight/create API.

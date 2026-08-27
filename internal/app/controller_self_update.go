@@ -235,6 +235,10 @@ func (a *App) controllerSelfUpdateStatus(w http.ResponseWriter, r *http.Request)
 	status := "running"
 	msg := "ZentContainer update helper is running"
 	if !x.State.Running {
+		// The stopped helper has already produced every status/log value needed by
+		// this response. Remove it after the response is assembled so Docker UIs
+		// do not retain zc-controller-update-* containers after an update.
+		defer func() { _ = d.ContainerRemove(context.Background(), id, true) }()
 		if x.State.ExitCode == 0 {
 			status = "done"
 			msg = "ZentContainer update completed"
