@@ -158,7 +158,7 @@
 .containerUpdateMark{display:inline-grid;place-items:center;width:17px;height:17px;margin-left:7px;border-radius:999px;border:1px solid #4c5f91;background:#18213a;color:#aebcff;font-size:11px;line-height:1;vertical-align:middle}.containerRow.hasUpdate>td:first-child{box-shadow:inset 2px 0 0 #6677c7}.updateScheduleGrid{display:grid;grid-template-columns:1fr 150px;gap:10px}.updateScanToggle{margin:2px 0 4px}.runtimeSettings select{width:100%;border:1px solid var(--line);background:#0e1117;color:var(--text);border-radius:9px;padding:9px 10px;outline:none}.runtimeSettings input[type="time"]{width:100%}@media(max-width:620px){.updateScheduleGrid{grid-template-columns:1fr}.containerUpdateMark{width:16px;height:16px}}
 
 /* v0.6.43 contextual updates + instant project tooltips */
-.groupCard.hasUpdate{box-shadow:inset 2px 0 0 #6677c7}
+.groupMemberRow.hasUpdate{box-shadow:inset 2px 0 0 #6677c7}
 .containerTable td.right.nowrap .btn+.btn{margin-left:6px}
 .zcTooltip{position:fixed;z-index:10000;max-width:min(360px,calc(100vw - 16px));padding:6px 8px;border:1px solid #384052;border-radius:7px;background:#111722;color:#e8edf7;box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:12px;line-height:1.35;white-space:normal;overflow-wrap:anywhere;pointer-events:none;opacity:0;visibility:hidden}.zcTooltip.show{opacity:1;visibility:visible}
 @media(hover:none){.zcTooltip{display:none!important}}
