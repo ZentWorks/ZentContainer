@@ -371,6 +371,9 @@ func runSelfUpdateStandaloneMode(args []string, requireControllerAck bool) error
 		if running {
 			_ = d.ContainerAction(bg, targetID, "start")
 		}
+		if !requireControllerAck {
+			clearControllerContinuity(bg, d, targetID)
+		}
 		return reason
 	}
 	if err := selfDisconnectAll(ctx, d, targetID, snap); err != nil {
@@ -455,6 +458,45 @@ func runSelfUpdateStandaloneMode(args []string, requireControllerAck bool) error
 	}
 }
 
+func controllerContinuityConfig() (string, string, error) {
+	dbPath := strings.TrimSpace(os.Getenv("ZC_SELFUPDATE_DB_PATH"))
+	token := strings.TrimSpace(os.Getenv("ZC_SELFUPDATE_CONTINUITY_TOKEN"))
+	if dbPath == "" || token == "" {
+		return "", "", errors.New("Controller continuity proof is missing from the self-update helper")
+	}
+	return dbPath, token, nil
+}
+
+func verifyControllerContinuity(ctx context.Context, d *dockerx.Client, container string) error {
+	dbPath, token, err := controllerContinuityConfig()
+	if err != nil {
+		return err
+	}
+	out, err := d.ExecRun(ctx, container, []string{"sqlite3", dbPath, "SELECT value FROM settings WHERE key='self_update_continuity' LIMIT 1;"})
+	if err != nil {
+		return fmt.Errorf("replacement cannot read the persistent Controller database: %w", err)
+	}
+	if strings.TrimSpace(string(out)) != token {
+		return errors.New("replacement does not see the previous Controller database; refusing to commit the self-update")
+	}
+	roleOut, err := d.ExecRun(ctx, container, []string{"sqlite3", dbPath, "SELECT value FROM settings WHERE key='role' LIMIT 1;"})
+	if err != nil {
+		return fmt.Errorf("replacement cannot verify the persistent Controller role: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(string(roleOut)), "controller") {
+		return errors.New("replacement persistent database is not configured as the Controller; refusing to commit the self-update")
+	}
+	return nil
+}
+
+func clearControllerContinuity(ctx context.Context, d *dockerx.Client, container string) {
+	dbPath, _, err := controllerContinuityConfig()
+	if err != nil {
+		return
+	}
+	_, _ = d.ExecRun(ctx, container, []string{"sqlite3", dbPath, "DELETE FROM settings WHERE key='self_update_continuity';"})
+}
+
 func controllerListenPortFromInspect(raw []byte) string {
 	var ci struct {
 		Config struct {
@@ -504,8 +546,15 @@ func waitLocalControllerReady(ctx context.Context, d *dockerx.Client, container,
 			if json.Unmarshal(raw, &ci) == nil && ci.State.Running && (targetID == "" || strings.TrimSpace(ci.Image) == targetID) {
 				healthy := ci.State.Health == nil || strings.EqualFold(strings.TrimSpace(ci.State.Health.Status), "healthy")
 				if healthy {
+					// /api/setup is intentionally reachable on an unconfigured instance, so
+					// HTTP health alone must never commit a Controller replacement. Prove
+					// that this exact replacement loaded the previous persistent SQLite DB.
+					if e := verifyControllerContinuity(ctx, d, container); e != nil {
+						return e
+					}
 					port := controllerListenPortFromInspect(raw)
 					if _, e := d.ExecRun(ctx, container, []string{"sh", "-c", fmt.Sprintf("wget -q -O- http://127.0.0.1:%s/api/setup >/dev/null", port)}); e == nil {
+						clearControllerContinuity(ctx, d, container)
 						return nil
 					}
 				}
@@ -513,7 +562,7 @@ func waitLocalControllerReady(ctx context.Context, d *dockerx.Client, container,
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return errors.New("updated ZentContainer did not become healthy and reachable through its local HTTP API")
+	return errors.New("updated ZentContainer did not become healthy, preserve its Controller database, and become reachable through its local HTTP API")
 }
 
 func waitComposeControllerReady(project, service, image string, timeout time.Duration) error {

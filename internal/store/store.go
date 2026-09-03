@@ -221,6 +221,9 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 func (s *Store) SetSetting(key, val string) error {
 	return s.exec("INSERT INTO settings(key,value) VALUES(" + q(key) + "," + q(val) + ") ON CONFLICT(key) DO UPDATE SET value=excluded.value;")
 }
+func (s *Store) DeleteSetting(key string) error {
+	return s.exec("DELETE FROM settings WHERE key=" + q(key) + ";")
+}
 
 func (s *Store) SetSettings(values map[string]string) error {
 	if len(values) == 0 {

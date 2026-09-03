@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.48
+  version: 0.6.49
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -14,7 +14,7 @@ paths:
     get: {summary: Get system status, responses: {'200': {description: OK}}}
   /system/self-update:
     post:
-      summary: Safely update this ZentContainer Controller while preserving its Docker installation model and configuration
+      summary: Safely update this ZentContainer Controller while preserving Docker configuration and persistent Controller identity
       requestBody:
         content:
           application/json:
@@ -25,7 +25,8 @@ paths:
       responses:
         '200': {description: Controller already uses the requested image}
         '202': {description: Controller self-update helper started}
-        '409': {description: Persistent data is missing or another self-update is running}
+        '409': {description: Persistent data/Compose safety preconditions failed or another self-update is running}
+        '500': {description: Persistent Controller continuity marker could not be prepared}
   /system/self-update-status:
     get:
       summary: Read the local ZentContainer Controller self-update helper status after restart

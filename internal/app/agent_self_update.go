@@ -27,6 +27,30 @@ func composeRecreateFallbackAllowed(currentImage, targetImage string) bool {
 	return strings.TrimSpace(currentImage) != "" && strings.TrimSpace(currentImage) == strings.TrimSpace(targetImage)
 }
 
+type selfMountInfo struct {
+	Type        string `json:"Type"`
+	Destination string `json:"Destination"`
+}
+
+func dataDirHasPersistentBacking(dataDir string, mounts []selfMountInfo) bool {
+	dataDir = filepath.Clean(dataDir)
+	bestLen := -1
+	bestType := ""
+	for _, m := range mounts {
+		dst := filepath.Clean(strings.TrimSpace(m.Destination))
+		if dst == "." || dst == "" {
+			continue
+		}
+		covers := dst == dataDir || (dst != "/" && strings.HasPrefix(dataDir, dst+string(os.PathSeparator))) || dst == "/"
+		if !covers || len(dst) <= bestLen {
+			continue
+		}
+		bestLen = len(dst)
+		bestType = strings.ToLower(strings.TrimSpace(m.Type))
+	}
+	return bestLen >= 0 && (bestType == "bind" || bestType == "volume")
+}
+
 type agentSelfUpdateRequest struct {
 	Image string `json:"image,omitempty"`
 }
@@ -176,28 +200,14 @@ func (a *App) agentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
-		Mounts []struct {
-			Type        string `json:"Type"`
-			Destination string `json:"Destination"`
-		} `json:"Mounts"`
+		Mounts []selfMountInfo `json:"Mounts"`
 	}
 	if err := json.Unmarshal(raw, &ci); err != nil {
 		errorJSON(w, 500, "self_inspect_decode_failed", err.Error())
 		return
 	}
 	dataDir := filepath.Clean(a.cfg.DataDir)
-	persistentData := false
-	for _, m := range ci.Mounts {
-		if m.Type != "bind" && m.Type != "volume" {
-			continue
-		}
-		dst := filepath.Clean(m.Destination)
-		if dst == dataDir || (dst != "/" && strings.HasPrefix(dataDir, dst+string(os.PathSeparator))) {
-			persistentData = true
-			break
-		}
-	}
-	if !persistentData {
+	if !dataDirHasPersistentBacking(dataDir, ci.Mounts) {
 		errorJSON(w, http.StatusConflict, "agent_data_not_persistent", "Agent self-update is blocked because the configured data directory is not backed by a bind mount or named volume. Updating would risk losing pairing and certificates.")
 		return
 	}
@@ -212,25 +222,23 @@ func (a *App) agentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 			errorJSON(w, 409, "compose_metadata_incomplete", "The Agent has incomplete Docker Compose labels and cannot be updated safely")
 			return
 		}
-		mode = "compose"
-		workingDir, files, err = composeConfigPaths(labels)
-		if err == nil {
-			err = a.composeSelfUpdatePreflight(ctx, workingDir, service, files)
-		}
-		if err != nil {
-			// Docker Compose labels describe paths as seen by the Compose client.
-			// When Compose itself ran in another container/UI those paths can be
-			// valid there but impossible for the Docker daemon to bind-mount. If
-			// the image reference itself is unchanged, safely fall back to the exact
-			// inspect-based recreation. The freshly pulled tag remains the Compose
-			// source of truth for a later `compose up`.
-			if !composeRecreateFallbackAllowed(ci.Config.Image, image) {
+		// For the normal self-update case (:latest -> newer :latest digest),
+		// exact inspect recreation is safer than re-running Compose because the
+		// original Compose client may have supplied shell/UI environment values
+		// that cannot be reconstructed here. The image reference remains unchanged,
+		// so the Compose source of truth is not modified or contradicted.
+		if composeRecreateFallbackAllowed(ci.Config.Image, image) {
+			mode = "compose-recreate"
+		} else {
+			mode = "compose"
+			workingDir, files, err = composeConfigPaths(labels)
+			if err == nil {
+				err = a.composeSelfUpdatePreflight(ctx, workingDir, service, files)
+			}
+			if err != nil {
 				errorJSON(w, 409, "compose_source_unavailable", "Compose source is not reachable from the Docker host and the requested image reference differs from the Compose service. Update the Compose source or use the same image reference.")
 				return
 			}
-			mode = "compose-recreate"
-			workingDir = ""
-			files = nil
 		}
 	}
 	if err := d.ImagePullProgress(ctx, image, a.registryAuthForImage(image), nil); err != nil {

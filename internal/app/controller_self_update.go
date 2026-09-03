@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,7 +15,10 @@ import (
 	"github.com/ZentWorks/ZentContainer/internal/version"
 )
 
-const defaultControllerUpdateImage = "ghcr.io/zentworks/zentcontainer:latest"
+const (
+	defaultControllerUpdateImage      = "ghcr.io/zentworks/zentcontainer:latest"
+	controllerSelfUpdateContinuityKey = "self_update_continuity"
+)
 
 type controllerSelfUpdateRequest struct {
 	Image string `json:"image,omitempty"`
@@ -70,25 +72,14 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
-		Mounts []struct{ Type, Destination string } `json:"Mounts"`
+		Mounts []selfMountInfo `json:"Mounts"`
 	}
 	if err := json.Unmarshal(raw, &ci); err != nil {
 		errorJSON(w, 500, "self_inspect_decode_failed", err.Error())
 		return
 	}
 	dataDir := filepath.Clean(a.cfg.DataDir)
-	persistent := false
-	for _, m := range ci.Mounts {
-		if m.Type != "bind" && m.Type != "volume" {
-			continue
-		}
-		dst := filepath.Clean(m.Destination)
-		if dst == dataDir || (dst != "/" && strings.HasPrefix(dataDir, dst+string(os.PathSeparator))) {
-			persistent = true
-			break
-		}
-	}
-	if !persistent {
+	if !dataDirHasPersistentBacking(dataDir, ci.Mounts) {
 		errorJSON(w, 409, "controller_data_not_persistent", "ZentContainer self-update is blocked because the data directory is not backed by a bind mount or named volume.")
 		return
 	}
@@ -100,22 +91,24 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	workingDir := ""
 	files := []string{}
 	if project != "" && service != "" {
-		wd, fs, sourceErr := composeConfigPaths(labels)
-		if sourceErr == nil {
-			sourceErr = a.composeSelfUpdatePreflight(ctx, wd, service, fs)
-		}
-		if sourceErr == nil {
+		// Same-reference self-updates intentionally preserve the exact running
+		// Docker configuration instead of re-evaluating Compose variables in a
+		// different client environment. This prevents a valid Compose file from
+		// silently resolving ZC_DATA_DIR or other variables to different values.
+		if composeRecreateFallbackAllowed(ci.Config.Image, image) {
+			mode = "compose-recreate"
+		} else {
+			wd, fs, sourceErr := composeConfigPaths(labels)
+			if sourceErr == nil {
+				sourceErr = a.composeSelfUpdatePreflight(ctx, wd, service, fs)
+			}
+			if sourceErr != nil {
+				errorJSON(w, 409, "compose_source_unavailable", "Compose source is not reachable from the Docker host and the requested image reference differs from the Compose service. Update the Compose source or use the same image reference.")
+				return
+			}
 			mode = "compose"
 			workingDir = wd
 			files = fs
-		} else if composeRecreateFallbackAllowed(ci.Config.Image, image) {
-			// Compose client paths may not exist on the Docker host (for example
-			// when Compose was launched by another container/UI). Recreate from the
-			// exact inspect data only when the image reference itself is unchanged.
-			mode = "compose-recreate"
-		} else {
-			errorJSON(w, 409, "compose_source_unavailable", "Compose source is not reachable from the Docker host and the requested image reference differs from the Compose service. Update the Compose source or use the same image reference.")
-			return
 		}
 	}
 	if err := d.ImagePullProgress(ctx, image, a.registryAuthForImage(image), nil); err != nil {
@@ -156,6 +149,21 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	jobName := "zc-controller-update-" + tok
 	backupName := "zc-controller-selfupdate-backup-" + tok
+	// A running HTTP endpoint is not sufficient proof that the replacement loaded
+	// this Controller's persistent state: /api/setup also responds on a fresh
+	// unconfigured instance. Store a one-time value in the existing SQLite DB and
+	// require the replacement to read the same value before the rollback container
+	// may be deleted.
+	if err := a.db.SetSetting(controllerSelfUpdateContinuityKey, tok); err != nil {
+		errorJSON(w, 500, "controller_continuity_prepare_failed", "Could not prepare persistent Controller continuity check: "+err.Error())
+		return
+	}
+	continuityOwned := true
+	cleanupContinuity := func() {
+		if continuityOwned {
+			_ = a.db.DeleteSetting(controllerSelfUpdateContinuityKey)
+		}
+	}
 	cmd := []string{"helper", "self-update-controller-standalone", selfID, image, backupName}
 	binds := []string{a.cfg.DockerSocket + ":/var/run/docker.sock:rw"}
 	if mode == "compose" {
@@ -163,18 +171,22 @@ func (a *App) controllerSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		cmd = append(cmd, files...)
 		binds = append(binds, workingDir+":/workspace:rw")
 	}
-	helperID, err := d.ContainerCreate(ctx, jobName, dockerx.CreateContainerRequest{Image: helperImage, Cmd: cmd, WorkingDir: "/workspace", Labels: map[string]string{
+	helperID, err := d.ContainerCreate(ctx, jobName, dockerx.CreateContainerRequest{Image: helperImage, Cmd: cmd, Env: []string{"ZC_SELFUPDATE_DB_PATH=" + a.cfg.DBPath(), "ZC_SELFUPDATE_CONTINUITY_TOKEN=" + tok}, WorkingDir: "/workspace", Labels: map[string]string{
 		"io.zentcontainer.controller-update": "true", "io.zentcontainer.controller-update.mode": mode, "io.zentcontainer.controller-update.target-version": targetVersion, "io.zentcontainer.controller-update.target-image-id": targetImageID, "io.zentcontainer.controller-update.old-container-id": selfID, "io.zentcontainer.controller-update.backup": backupName,
 	}, HostConfig: dockerx.HostConfig{Binds: binds, NetworkMode: "none", CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"}}})
 	if err != nil {
+		cleanupContinuity()
 		errorJSON(w, 502, "controller_update_helper_create_failed", err.Error())
 		return
 	}
 	if err := d.ContainerAction(ctx, helperID, "start"); err != nil {
 		_ = d.ContainerRemove(context.Background(), helperID, true)
+		cleanupContinuity()
 		errorJSON(w, 502, "controller_update_helper_start_failed", err.Error())
 		return
 	}
+	// The detached helper owns the continuity marker from this point onward.
+	continuityOwned = false
 	a.db.AddAudit(a.currentActor(r), "controller.self_update", selfID, mode+" | "+version.Version+" -> "+targetVersion+" | "+image)
 	writeJSONStatus(w, http.StatusAccepted, controllerSelfUpdateResponse{JobID: helperID, Mode: mode, Image: image, CurrentVersion: version.Version, TargetVersion: targetVersion, Status: "restarting"})
 }
