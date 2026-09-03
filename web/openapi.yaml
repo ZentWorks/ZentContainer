@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.49
+  version: 0.6.50
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -537,6 +537,9 @@ components:
         privileged: {type: boolean, default: false}
         readonlyRootfs: {type: boolean, default: false}
         autoRemove: {type: boolean, default: false}
+        tty: {type: boolean, default: false, description: Allocate a pseudo-TTY (docker run -t)}
+        openStdin: {type: boolean, default: false, description: Keep STDIN open (docker run -i)}
+        init: {type: boolean, default: false, description: Run an init process inside the container (docker run --init)}
         memoryMB: {type: integer, format: int64, minimum: 0}
         memoryReservationMB: {type: integer, format: int64, minimum: 0}
         memorySwapMB: {type: integer, format: int64, minimum: 0}

@@ -122,6 +122,9 @@ type CreateContainerRequest struct {
 	WorkingDir       string                    `json:"WorkingDir,omitempty"`
 	Hostname         string                    `json:"Hostname,omitempty"`
 	User             string                    `json:"User,omitempty"`
+	Tty              bool                      `json:"Tty,omitempty"`
+	OpenStdin        bool                      `json:"OpenStdin,omitempty"`
+	AttachStdin      bool                      `json:"AttachStdin,omitempty"`
 	Labels           map[string]string         `json:"Labels,omitempty"`
 	ExposedPorts     map[string]map[string]any `json:"ExposedPorts,omitempty"`
 	Healthcheck      *HealthConfig             `json:"Healthcheck,omitempty"`
@@ -146,6 +149,7 @@ type HostConfig struct {
 	CapDrop           []string                 `json:"CapDrop,omitempty"`
 	SecurityOpt       []string                 `json:"SecurityOpt,omitempty"`
 	AutoRemove        bool                     `json:"AutoRemove,omitempty"`
+	Init              bool                     `json:"Init,omitempty"`
 	Memory            int64                    `json:"Memory,omitempty"`
 	MemoryReservation int64                    `json:"MemoryReservation,omitempty"`
 	MemorySwap        int64                    `json:"MemorySwap,omitempty"`

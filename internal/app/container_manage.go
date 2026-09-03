@@ -73,6 +73,9 @@ type containerInput struct {
 	Privileged          bool                    `json:"privileged,omitempty"`
 	ReadonlyRootfs      bool                    `json:"readonlyRootfs,omitempty"`
 	AutoRemove          bool                    `json:"autoRemove,omitempty"`
+	TTY                 bool                    `json:"tty,omitempty"`
+	OpenStdin           bool                    `json:"openStdin,omitempty"`
+	Init                bool                    `json:"init,omitempty"`
 	MemoryMB            int64                   `json:"memoryMB"`
 	MemoryReservationMB int64                   `json:"memoryReservationMB"`
 	MemorySwapMB        int64                   `json:"memorySwapMB"`
@@ -630,7 +633,7 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 	}
 	labels["io.zentcontainer.managed"] = "true"
 	labels["io.zentcontainer.created-by"] = "zentcontainer"
-	hc := dockerx.HostConfig{Binds: binds, PortBindings: pb, RestartPolicy: dockerx.RestartPolicy{Name: in.Restart}, NetworkMode: networkMode, CpusetCpus: in.CPUSet, CpuShares: in.CPUShares, PidsLimit: in.PidsLimit, Dns: in.DNS, CapAdd: append([]string(nil), in.CapAdd...), CapDrop: append([]string(nil), in.CapDrop...), SecurityOpt: append([]string(nil), in.SecurityOpt...), Privileged: in.Privileged, ReadonlyRootfs: in.ReadonlyRootfs, AutoRemove: in.AutoRemove}
+	hc := dockerx.HostConfig{Binds: binds, PortBindings: pb, RestartPolicy: dockerx.RestartPolicy{Name: in.Restart}, NetworkMode: networkMode, CpusetCpus: in.CPUSet, CpuShares: in.CPUShares, PidsLimit: in.PidsLimit, Dns: in.DNS, CapAdd: append([]string(nil), in.CapAdd...), CapDrop: append([]string(nil), in.CapDrop...), SecurityOpt: append([]string(nil), in.SecurityOpt...), Privileged: in.Privileged, ReadonlyRootfs: in.ReadonlyRootfs, AutoRemove: in.AutoRemove, Init: in.Init}
 	if in.MemoryMB > 0 {
 		hc.Memory = in.MemoryMB * 1024 * 1024
 	}
@@ -656,7 +659,7 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 	if in.GPUAll {
 		hc.DeviceRequests = []dockerx.DeviceRequest{{Driver: "", Count: -1, Capabilities: [][]string{{"gpu"}}}}
 	}
-	req := dockerx.CreateContainerRequest{Image: in.Image, Cmd: cmd, Entrypoint: append([]string(nil), in.Entrypoint...), Env: env, WorkingDir: in.WorkingDir, Hostname: in.Hostname, User: in.User, Labels: labels, ExposedPorts: exp, Healthcheck: healthConfig(in.Health), HostConfig: hc}
+	req := dockerx.CreateContainerRequest{Image: in.Image, Cmd: cmd, Entrypoint: append([]string(nil), in.Entrypoint...), Env: env, WorkingDir: in.WorkingDir, Hostname: in.Hostname, User: in.User, Tty: in.TTY, OpenStdin: in.OpenStdin, AttachStdin: in.OpenStdin, Labels: labels, ExposedPorts: exp, Healthcheck: healthConfig(in.Health), HostConfig: hc}
 	if networkMode != "" {
 		if cfg, ok := networkConfigMap(in)[networkMode]; ok {
 			endpoint := endpointSettingsFromInput(cfg)

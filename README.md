@@ -11,7 +11,7 @@ ZentContainer is an MIT-licensed Docker management UI by **ZentWorks** with a se
 - Manage containers, images, volumes and networks
 - Preserve per-network IP/MAC identity during standalone container edits, updates and rollback
 - Clear primary/additional network selection in the container form; `host` and `none` stay exclusive and do not expose irrelevant identity fields
-- Create and edit standalone containers, including editable Host-IP-specific port bindings and safe `docker run` command import that fills the structured form without executing shell input
+- Create and edit standalone containers, including editable Host-IP-specific port bindings and safe `docker run` command import that fills the structured form without executing shell input; supported values are applied explicitly, including environment variables, ports, mounts, TTY/STDIN/init and advanced Docker settings
 - Live host and container CPU/RAM/network throughput metrics with host CPU sampled across the normal live interval and VPS steal/I/O-wait reported separately
 - Logs, terminal, processes, diagnostics and mounted-volume file access
 - Container groups across one or multiple Docker hosts with aggregated live CPU/RAM/network throughput, member-level update highlighting inside groups and direct cleanup of members whose containers no longer exist
