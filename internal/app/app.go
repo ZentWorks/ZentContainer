@@ -49,6 +49,7 @@ type App struct {
 	metricsData              []byte
 	metricsAt                time.Time
 	metricsRefreshing        bool
+	hostMetricsCollector     volumehelper.HostMetricsCollector
 	storageMu                sync.Mutex
 	storageData              dockerStorageSummary
 	storageAt                time.Time
@@ -1302,7 +1303,7 @@ func (a *App) refreshHostMetrics(ctx context.Context) ([]byte, error) {
 		return nil, ctx.Err()
 	default:
 	}
-	metrics, err := volumehelper.CollectHostMetrics("/host-proc", "", "/host-hostname", "/host-os-release")
+	metrics, err := a.hostMetricsCollector.Collect("/host-proc", "", "/host-hostname", "/host-os-release")
 	if err != nil {
 		a.metricsMu.Lock()
 		a.metricsRefreshing = false

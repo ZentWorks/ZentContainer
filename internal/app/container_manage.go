@@ -458,6 +458,12 @@ func normalizeContainerInput(in *containerInput) error {
 				return fmt.Errorf("invalid host port: %s", p.Host)
 			}
 		}
+		if p.HostIP != "" {
+			p.HostIP = strings.Trim(p.HostIP, "[]")
+			if net.ParseIP(p.HostIP) == nil {
+				return fmt.Errorf("invalid host IP: %s", p.HostIP)
+			}
+		}
 		if p.Protocol == "" {
 			p.Protocol = "tcp"
 		}
@@ -662,11 +668,46 @@ func buildContainerRequest(in containerInput) dockerx.CreateContainerRequest {
 }
 
 type portConflict struct {
+	HostIP      string `json:"host_ip,omitempty"`
 	HostPort    string `json:"host_port"`
 	Protocol    string `json:"protocol"`
 	Container   string `json:"container"`
 	ContainerID string `json:"container_id"`
 	Suggestion  string `json:"suggestion,omitempty"`
+}
+
+type usedPortBinding struct {
+	IP        string
+	Port      string
+	Protocol  string
+	Container dockerx.ContainerSummary
+}
+
+func normalizedHostIP(v string) string {
+	v = strings.Trim(strings.TrimSpace(v), "[]")
+	if v == "" {
+		return "0.0.0.0"
+	}
+	return v
+}
+
+func portBindingIPsConflict(a, b string) bool {
+	a, b = normalizedHostIP(a), normalizedHostIP(b)
+	if a == b {
+		return true
+	}
+	aIP, bIP := net.ParseIP(a), net.ParseIP(b)
+	if aIP == nil || bIP == nil {
+		return false
+	}
+	a4, b4 := aIP.To4() != nil, bIP.To4() != nil
+	if a4 != b4 {
+		return false
+	}
+	if a4 {
+		return a == "0.0.0.0" || b == "0.0.0.0"
+	}
+	return a == "::" || b == "::"
 }
 
 func (a *App) containerPortConflicts(ctx context.Context, in containerInput, excludeID string) ([]portConflict, error) {
@@ -678,38 +719,46 @@ func (a *App) containerPortConflicts(ctx context.Context, in containerInput, exc
 	if err != nil {
 		return nil, err
 	}
-	used := map[string]dockerx.ContainerSummary{}
+	used := []usedPortBinding{}
 	for _, c := range cs {
 		if c.ID == excludeID || strings.HasPrefix(c.ID, excludeID) || strings.HasPrefix(excludeID, c.ID) {
 			continue
 		}
 		for _, p := range c.Ports {
 			if p.PublicPort > 0 {
-				used[strconv.Itoa(p.PublicPort)+"/"+strings.ToLower(p.Type)] = c
+				used = append(used, usedPortBinding{IP: p.IP, Port: strconv.Itoa(p.PublicPort), Protocol: strings.ToLower(p.Type), Container: c})
 			}
 		}
+	}
+	conflicting := func(ip, port, protocol string) (dockerx.ContainerSummary, bool) {
+		for _, u := range used {
+			if u.Port == port && u.Protocol == protocol && portBindingIPsConflict(ip, u.IP) {
+				return u.Container, true
+			}
+		}
+		return dockerx.ContainerSummary{}, false
 	}
 	out := []portConflict{}
 	for _, p := range in.Ports {
 		if p.Host == "" {
 			continue
 		}
-		key := p.Host + "/" + p.Protocol
-		if c, ok := used[key]; ok {
+		if c, ok := conflicting(p.HostIP, p.Host, p.Protocol); ok {
 			name := strings.TrimPrefix(first(c.Names), "/")
 			sug := ""
 			hp, _ := strconv.Atoi(p.Host)
 			for n := hp + 1; n <= 65535 && n < hp+100; n++ {
-				if _, exists := used[strconv.Itoa(n)+"/"+p.Protocol]; !exists {
+				if _, exists := conflicting(p.HostIP, strconv.Itoa(n), p.Protocol); !exists {
 					sug = strconv.Itoa(n)
 					break
 				}
 			}
-			out = append(out, portConflict{HostPort: p.Host, Protocol: p.Protocol, Container: name, ContainerID: c.ID, Suggestion: sug})
+			out = append(out, portConflict{HostIP: p.HostIP, HostPort: p.Host, Protocol: p.Protocol, Container: name, ContainerID: c.ID, Suggestion: sug})
 		}
 	}
 	return out, nil
 }
+
 func first(v []string) string {
 	if len(v) > 0 {
 		return v[0]

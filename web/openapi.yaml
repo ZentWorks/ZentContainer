@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.47
+  version: 0.6.48
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -88,7 +88,14 @@ paths:
                 properties:
                   storage: {$ref: '#/components/schemas/DockerStorageSummary'}
   /host-metrics:
-    get: {summary: Get host CPU, memory, load, uptime and network traffic metrics, responses: {'200': {description: OK}}}
+    get:
+      summary: Get host CPU, memory, load, uptime and network traffic metrics
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HostMetrics'}
   /hosts:
     get: {summary: List local and paired remote hosts, responses: {'200': {description: OK}}}
   /hosts/pair:
@@ -545,7 +552,7 @@ components:
               host: {type: string}
               container: {type: string}
               protocol: {type: string, enum: [tcp, udp, sctp]}
-              hostIP: {type: string}
+              hostIP: {type: string, description: Optional host IP literal for this published port, e.g. 0.0.0.0, 127.0.0.1, a LAN address or IPv6. Conflict checks are scoped by IP family/address.}
         volumes:
           type: array
           items:
@@ -604,6 +611,44 @@ components:
           type: array
           maxItems: 500
           items: {$ref: '#/components/schemas/ContainerGroupMember'}
+    HostMetrics:
+      type: object
+      properties:
+        hostname: {type: string}
+        os: {type: string}
+        kernel: {type: string}
+        architecture: {type: string}
+        uptime_seconds: {type: number, format: double, minimum: 0}
+        load_1: {type: number, format: double, minimum: 0}
+        load_5: {type: number, format: double, minimum: 0}
+        load_15: {type: number, format: double, minimum: 0}
+        collected_at: {type: integer, format: int64}
+        cpu:
+          type: object
+          description: CPU percentages are calculated from successive host /proc/stat samples. usage_percent excludes iowait and hypervisor steal time; those are exposed separately.
+          properties:
+            usage_percent: {type: number, format: double, minimum: 0, maximum: 100}
+            iowait_percent: {type: number, format: double, minimum: 0, maximum: 100}
+            steal_percent: {type: number, format: double, minimum: 0, maximum: 100}
+            logical_cpus: {type: integer, minimum: 0}
+        memory:
+          type: object
+          properties:
+            total: {type: integer, format: int64, minimum: 0}
+            available: {type: integer, format: int64, minimum: 0}
+            used: {type: integer, format: int64, minimum: 0}
+            swap_total: {type: integer, format: int64, minimum: 0}
+            swap_free: {type: integer, format: int64, minimum: 0}
+        networks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              rx_bytes: {type: integer, format: int64, minimum: 0}
+              tx_bytes: {type: integer, format: int64, minimum: 0}
+              rx_per_sec: {type: number, format: double, minimum: 0}
+              tx_per_sec: {type: number, format: double, minimum: 0}
     DockerStorageSummary:
       type: object
       description: Cached Docker Engine disk-usage summary. This is Docker data usage, not total host filesystem capacity.

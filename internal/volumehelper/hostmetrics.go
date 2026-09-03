@@ -7,13 +7,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 type HostCPU struct {
-	UsagePercent float64 `json:"usage_percent"`
-	LogicalCPUs  int     `json:"logical_cpus"`
+	UsagePercent  float64 `json:"usage_percent"`
+	IOWaitPercent float64 `json:"iowait_percent"`
+	StealPercent  float64 `json:"steal_percent"`
+	LogicalCPUs   int     `json:"logical_cpus"`
 }
 
 type HostMemory struct {
@@ -57,28 +60,95 @@ type HostMetrics struct {
 	CollectedAt  int64         `json:"collected_at"`
 }
 
-type cpuSample struct{ idle, total uint64 }
+type cpuSample struct {
+	idle, iowait, steal, total uint64
+}
 type netSample struct{ rx, tx uint64 }
 
+type HostMetricsCollector struct {
+	mu          sync.Mutex
+	previousCPU cpuSample
+	previousNet map[string]netSample
+	previousAt  time.Time
+	haveSample  bool
+}
+
+func cpuPercentages(before, now cpuSample) (usage, iowait, steal float64) {
+	if now.total < before.total {
+		return 0, 0, 0
+	}
+	dt := now.total - before.total
+	if dt == 0 {
+		return 0, 0, 0
+	}
+	delta := func(a, b uint64) uint64 {
+		if b >= a {
+			return b - a
+		}
+		return 0
+	}
+	idleDelta := delta(before.idle, now.idle)
+	iowaitDelta := delta(before.iowait, now.iowait)
+	stealDelta := delta(before.steal, now.steal)
+	nonWork := idleDelta + iowaitDelta + stealDelta
+	busy := uint64(0)
+	if dt > nonWork {
+		busy = dt - nonWork
+	}
+	usage = float64(busy) / float64(dt) * 100
+	iowait = float64(iowaitDelta) / float64(dt) * 100
+	steal = float64(stealDelta) / float64(dt) * 100
+	return usage, iowait, steal
+}
+
 // CollectHostMetrics reads host metrics directly from a read-only host /proc mount.
-// hostRoot is optional; when empty, filesystem capacity discovery is skipped so the
-// main ZentContainer process does not need a permanent mount of the host root.
+// It is kept as a stateless convenience wrapper. Long-running callers should reuse
+// HostMetricsCollector so CPU/network rates are measured across the normal polling
+// interval instead of a short burst-prone window.
 func CollectHostMetrics(proc, hostRoot, hostnamePath, osReleasePath string) (HostMetrics, error) {
+	collector := &HostMetricsCollector{}
+	return collector.Collect(proc, hostRoot, hostnamePath, osReleasePath)
+}
+
+// Collect samples host metrics. After the first warm-up sample, CPU and network
+// rates use the interval since the previous collection (normally about five seconds
+// in ZentContainer). CPU workload excludes iowait and hypervisor steal time; both
+// are reported separately so a busy VPS host cannot masquerade as container load.
+func (c *HostMetricsCollector) Collect(proc, hostRoot, hostnamePath, osReleasePath string) (HostMetrics, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if _, err := os.Stat(proc + "/stat"); err != nil {
 		return HostMetrics{}, fmt.Errorf("host proc is unavailable: %w", err)
 	}
-	firstCPU, logical, _ := readCPU(proc + "/stat")
-	firstNet, _ := readNetworks(proc + "/net/dev")
-	started := time.Now()
-	time.Sleep(250 * time.Millisecond)
-	secondCPU, _, _ := readCPU(proc + "/stat")
-	secondNet, _ := readNetworks(proc + "/net/dev")
-	elapsed := time.Since(started).Seconds()
+	nowCPU, logical, err := readCPU(proc + "/stat")
+	if err != nil {
+		return HostMetrics{}, err
+	}
+	nowNet, _ := readNetworks(proc + "/net/dev")
+	nowAt := time.Now()
+	beforeCPU, beforeNet, beforeAt := c.previousCPU, c.previousNet, c.previousAt
+	if !c.haveSample {
+		// One warm-up delay only at process start. Subsequent samples span the full
+		// dashboard polling interval and therefore do not exaggerate short bursts.
+		time.Sleep(500 * time.Millisecond)
+		beforeCPU, beforeNet, beforeAt = nowCPU, nowNet, nowAt
+		nowCPU, logical, err = readCPU(proc + "/stat")
+		if err != nil {
+			return HostMetrics{}, err
+		}
+		nowNet, _ = readNetworks(proc + "/net/dev")
+		nowAt = time.Now()
+	}
+	c.previousCPU = nowCPU
+	c.previousNet = nowNet
+	c.previousAt = nowAt
+	c.haveSample = true
+	elapsed := nowAt.Sub(beforeAt).Seconds()
 	if elapsed <= 0 {
-		elapsed = .25
+		elapsed = .5
 	}
 
-	m := HostMetrics{CollectedAt: time.Now().Unix(), Disks: []HostDisk{}, Networks: []HostNetwork{}}
+	m := HostMetrics{CollectedAt: nowAt.Unix(), Disks: []HostDisk{}, Networks: []HostNetwork{}}
 	m.Hostname = strings.TrimSpace(readText(hostnamePath, readText(proc+"/sys/kernel/hostname", "")))
 	m.OS = osRelease(osReleasePath)
 	m.Kernel = strings.TrimSpace(readText(proc+"/sys/kernel/osrelease", ""))
@@ -99,28 +169,25 @@ func CollectHostMetrics(proc, hostRoot, hostnamePath, osReleasePath string) (Hos
 		m.Load15, _ = strconv.ParseFloat(loads[2], 64)
 	}
 	m.CPU.LogicalCPUs = logical
-	if dt := secondCPU.total - firstCPU.total; dt > 0 {
-		idle := secondCPU.idle - firstCPU.idle
-		m.CPU.UsagePercent = (1 - float64(idle)/float64(dt)) * 100
-	}
+	m.CPU.UsagePercent, m.CPU.IOWaitPercent, m.CPU.StealPercent = cpuPercentages(beforeCPU, nowCPU)
 	m.Memory = readMemory(proc + "/meminfo")
 	if hostRoot != "" {
 		m.Disks = readDisks(proc, hostRoot)
 	}
 
-	for name, now := range secondNet {
+	for name, sample := range nowNet {
 		if name == "lo" {
 			continue
 		}
-		before := firstNet[name]
+		before := beforeNet[name]
 		var rxDelta, txDelta uint64
-		if now.rx >= before.rx {
-			rxDelta = now.rx - before.rx
+		if sample.rx >= before.rx {
+			rxDelta = sample.rx - before.rx
 		}
-		if now.tx >= before.tx {
-			txDelta = now.tx - before.tx
+		if sample.tx >= before.tx {
+			txDelta = sample.tx - before.tx
 		}
-		m.Networks = append(m.Networks, HostNetwork{Name: name, RXBytes: now.rx, TXBytes: now.tx, RXPerSec: float64(rxDelta) / elapsed, TXPerSec: float64(txDelta) / elapsed})
+		m.Networks = append(m.Networks, HostNetwork{Name: name, RXBytes: sample.rx, TXBytes: sample.tx, RXPerSec: float64(rxDelta) / elapsed, TXPerSec: float64(txDelta) / elapsed})
 	}
 	return m, nil
 }
@@ -141,16 +208,25 @@ func readCPU(path string) (cpuSample, int, error) {
 		}
 		if fs[0] == "cpu" {
 			var vals []uint64
-			for _, x := range fs[1:] {
+			// /proc/stat guest and guest_nice are already included in user/nice.
+			// Summing them again inflates the total, so only fields through steal
+			// participate in the CPU time denominator.
+			for i, x := range fs[1:] {
+				if i > 7 {
+					break
+				}
 				v, _ := strconv.ParseUint(x, 10, 64)
 				vals = append(vals, v)
 				out.total += v
 			}
 			if len(vals) > 3 {
 				out.idle = vals[3]
-				if len(vals) > 4 {
-					out.idle += vals[4]
-				}
+			}
+			if len(vals) > 4 {
+				out.iowait = vals[4]
+			}
+			if len(vals) > 7 {
+				out.steal = vals[7]
 			}
 		} else if strings.HasPrefix(fs[0], "cpu") {
 			if _, e := strconv.Atoi(strings.TrimPrefix(fs[0], "cpu")); e == nil {
