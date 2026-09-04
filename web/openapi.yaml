@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.50
+  version: 0.6.51
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -292,7 +292,7 @@ paths:
     post: {summary: Disconnect a container from a network, responses: {'200': {description: OK}}}
   /projects:
     get: {summary: List project workspaces, responses: {'200': {description: OK}}}
-    post: {summary: Create a project directory; only a name is required, responses: {'201': {description: Created}}}
+    post: {summary: Create a project directory; only a name is required, description: Project names are normalized server-side to lowercase a-z, digits, dot, hyphen and underscore; invalid characters are removed, the first character must be alphanumeric, and names are limited to 64 characters., responses: {'201': {description: Created with the normalized name}}}
   /projects/validate:
     post: {summary: Validate supplied unsaved Compose and env content, responses: {'200': {description: Valid}}}
   /projects/{name}:

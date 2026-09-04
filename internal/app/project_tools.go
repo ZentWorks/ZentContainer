@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/ZentWorks/ZentContainer/internal/projects"
 )
 
 func (a *App) projectDiagnostics(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +141,7 @@ func (a *App) projectImport(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
-	name := strings.TrimSpace(r.FormValue("name"))
+	name := projects.NormalizeName(r.FormValue("name"))
 	if name == "" {
 		errorJSON(w, 400, "import_failed", "project name is required")
 		return
@@ -238,9 +240,13 @@ func (a *App) containerConvertCompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	containerName := strings.TrimPrefix(asString(ci["Name"]), "/")
-	name := strings.TrimSpace(in.Name)
+	name := projects.NormalizeName(in.Name)
 	if name == "" {
-		name = safeName(containerName)
+		name = projects.NormalizeName(safeName(containerName))
+	}
+	if name == "" {
+		errorJSON(w, 400, "project_create_failed", "project name must contain at least one letter or number")
+		return
 	}
 	if err := a.projects.Create(name); err != nil {
 		errorJSON(w, 409, "project_create_failed", err.Error())

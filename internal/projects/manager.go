@@ -96,6 +96,28 @@ type projectMeta struct {
 }
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
+
+// NormalizeName canonicalizes newly created project names. Existing projects with
+// legacy mixed-case names remain addressable through path(), while every new
+// create/import API path uses this lowercase, filesystem-safe form.
+func NormalizeName(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	s = b.String()
+	for len(s) > 0 && !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9')) {
+		s = s[1:]
+	}
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
 var envExpr = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-|:\?|\?|:\+|\+)([^}]*))?\}`)
 var simpleEnvExpr = regexp.MustCompile(`(^|[^$])\$([A-Za-z_][A-Za-z0-9_]*)`)
 var serviceLine = regexp.MustCompile(`(?m)^\s{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$`)

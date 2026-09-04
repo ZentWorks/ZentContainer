@@ -2340,29 +2340,35 @@ func (a *App) projectSave(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if strings.TrimSpace(in.Name) == "" {
-		errorJSON(w, 400, "project_save_failed", "project name is required")
+	name := projects.NormalizeName(in.Name)
+	if name == "" {
+		errorJSON(w, 400, "project_save_failed", "project name must contain at least one letter or number")
 		return
 	}
 	var err error
 	if strings.TrimSpace(in.Compose) == "" {
-		err = a.projects.Create(in.Name)
+		err = a.projects.Create(name)
 	} else {
-		err = a.projects.Save(in.Name, in.Compose, in.Env)
+		err = a.projects.Save(name, in.Compose, in.Env)
 	}
 	if err != nil {
 		errorJSON(w, 400, "project_save_failed", err.Error())
 		return
 	}
-	a.db.AddAudit(a.currentActor(r), "project.create", in.Name, "")
-	writeJSONStatus(w, 201, map[string]any{"ok": true, "name": in.Name})
+	a.db.AddAudit(a.currentActor(r), "project.create", name, "")
+	writeJSONStatus(w, 201, map[string]any{"ok": true, "name": name})
 }
 func (a *App) projectValidateContent(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Name, Compose, Env string }
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	out, err := a.projects.ValidateContent(in.Name, in.Compose, in.Env)
+	name := projects.NormalizeName(in.Name)
+	if name == "" {
+		errorJSON(w, 400, "compose_invalid", "project name must contain at least one letter or number")
+		return
+	}
+	out, err := a.projects.ValidateContent(name, in.Compose, in.Env)
 	if err != nil {
 		errorJSON(w, 400, "compose_invalid", err.Error())
 		return
@@ -2374,13 +2380,21 @@ func (a *App) projectSaveNamed(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	name := r.PathValue("name")
+	requested := r.PathValue("name")
+	name := requested
+	if _, err := a.projects.Get(requested); err != nil {
+		name = projects.NormalizeName(requested)
+		if name == "" {
+			errorJSON(w, 400, "project_save_failed", "project name must contain at least one letter or number")
+			return
+		}
+	}
 	if err := a.projects.Save(name, in.Compose, in.Env); err != nil {
 		errorJSON(w, 400, "project_save_failed", err.Error())
 		return
 	}
 	a.db.AddAudit(a.currentActor(r), "project.save", name, "legacy compose editor")
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "name": name})
 }
 
 func (a *App) projectFiles(w http.ResponseWriter, r *http.Request) {
