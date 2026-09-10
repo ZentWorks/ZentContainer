@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.51
+  version: 0.6.53
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -310,7 +310,7 @@ paths:
     delete: {summary: Delete a project file or directory, responses: {'200': {description: OK}}}
   /projects/{name}/mkdir:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
-    post: {summary: Create a project directory, responses: {'201': {description: Created}}}
+    post: {summary: Create a project directory, description: Newly created project workspace directories use mode 0755 for bind-mount compatibility; existing directory permissions are not changed., responses: {'201': {description: Created}}}
   /projects/{name}/rename:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
     post: {summary: Rename/move a project file or directory inside the project root, responses: {'200': {description: OK}}}

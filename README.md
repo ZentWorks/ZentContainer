@@ -9,21 +9,21 @@ ZentContainer is an MIT-licensed Docker management UI by **ZentWorks** with a se
 ## Features
 
 - Manage containers, images, volumes and networks
-- Preserve per-network IP/MAC identity during standalone container edits, updates and rollback
-- Clear primary/additional network selection in the container form; `host` and `none` stay exclusive and do not expose irrelevant identity fields
-- Create and edit standalone containers, including editable Host-IP-specific port bindings and safe `docker run` command import that fills the structured form without executing shell input; supported values are applied explicitly, including environment variables, ports, mounts, TTY/STDIN/init and advanced Docker settings
-- Live host and container CPU/RAM/network throughput metrics with host CPU sampled across the normal live interval and VPS steal/I/O-wait reported separately
+- Create and edit standalone containers with advanced Docker options
+- Import `docker run` commands into the container creation form
+- Live host and container CPU, memory and network metrics
 - Logs, terminal, processes, diagnostics and mounted-volume file access
-- Container groups across one or multiple Docker hosts with aggregated live CPU/RAM/network throughput, member-level update highlighting inside groups and direct cleanup of members whose containers no longer exist
-- Compose project management with editing, validation, logs and lifecycle controls, a clickable `.env` variable assistant, and lowercase filesystem-safe project-name normalization enforced in both WebUI and API
-- Scheduled and manual image update checks with persistent update markers and contextual update buttons only when an update is confirmed, plus controlled container updates with live step-by-step progress, automatic rollback on failure and automatic removal of temporary rollback/update-helper containers after completion
+- Organize containers in groups across one or multiple Docker hosts
+- Manage Compose projects with editing, validation, `.env` support, logs and lifecycle controls
+- Scheduled and manual image update checks
+- Controlled container updates with automatic rollback on failure
 - Project and volume backup/restore
-- Private registry credentials stored encrypted
-- Controller/Agent mode for remote Docker hosts using TLS 1.3 + mTLS
-- Self-update for the Controller and paired Agents, including Compose and standalone Docker installations
+- Private registry support
+- Controller/Agent mode for securely managing remote Docker hosts
+- Self-update for Controllers and paired Agents
 - Scoped API keys
 - Built-in API Explorer and OpenAPI specification
-- German and English WebUI/documentation
+- German and English WebUI and documentation
 - Responsive installable Web App for desktop and mobile browsers
 
 ## Installation
@@ -110,7 +110,7 @@ A **Controller** manages its local Docker Engine and provides the full WebUI and
 
 An **Agent** lets a Controller manage another Docker host. The Controller must be able to reach the Agent on TCP `9444`. Pairing uses a one-time code, certificate pinning, TLS 1.3 and mutual TLS.
 
-ZentContainer can update itself and paired Agents directly from the WebUI. The active Controller/Agent container can also be checked and updated directly from the **Containers** detail action bar; ZentContainer automatically routes that exact self container to the safe self-update path. For same-reference updates such as `:latest` to a newer `:latest` digest, Compose-managed instances use exact Docker-inspect recreation instead of re-running Compose with potentially different client-side environment variables. The running mounts, environment, ports, labels and network identity are preserved while the Compose image reference remains unchanged. Changing to a different image reference still requires reachable editable Compose source. Docker-run, Unraid, Portainer and other Docker-created installations use the same exact recreation path. Failures roll back automatically, paired Agents additionally require the Controller to reconnect over mTLS, and the Controller must prove access to the previous persistent SQLite database before its update is committed.
+ZentContainer can update the Controller and paired Agents directly from the WebUI. Compose-managed and standalone Docker installations are supported. Existing configuration is preserved during the update, and a failed replacement is rolled back automatically.
 
 ## API
 

@@ -118,6 +118,53 @@ func NormalizeName(name string) string {
 	return s
 }
 
+const projectDirMode os.FileMode = 0755
+
+// mkdirProjectAll creates only missing project/workspace directories with a
+// container-friendly mode. Existing directories are deliberately left unchanged
+// so upgrades never rewrite administrator-managed permissions. os.Chmod on newly
+// created directories makes the requested mode deterministic even with a
+// restrictive process umask.
+func mkdirProjectAll(path string) error {
+	path = filepath.Clean(path)
+	missing := []string{}
+	cur := path
+	for {
+		_, err := os.Lstat(cur)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, cur)
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		dir := missing[i]
+		created := false
+		if err := os.Mkdir(dir, projectDirMode); err != nil {
+			if !os.IsExist(err) {
+				return err
+			}
+		} else {
+			created = true
+		}
+		// Override a restrictive process umask only for directories created by
+		// this operation. Existing administrator-managed permissions stay intact.
+		if created {
+			if err := os.Chmod(dir, projectDirMode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 var envExpr = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-|:\?|\?|:\+|\+)([^}]*))?\}`)
 var simpleEnvExpr = regexp.MustCompile(`(^|[^$])\$([A-Za-z_][A-Za-z0-9_]*)`)
 var serviceLine = regexp.MustCompile(`(?m)^\s{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$`)
@@ -144,7 +191,7 @@ func (m *Manager) Create(name string) error {
 	if _, err := os.Stat(dir); err == nil {
 		return errors.New("project already exists")
 	}
-	return os.MkdirAll(dir, 0700)
+	return mkdirProjectAll(dir)
 }
 
 func (m *Manager) List() ([]Project, error) {
@@ -233,7 +280,7 @@ func (m *Manager) Save(name, compose, env string) error {
 		return err
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := mkdirProjectAll(dir); err != nil {
 			return err
 		}
 	}
@@ -268,7 +315,7 @@ func (m *Manager) Delete(name string) error {
 }
 
 func atomicWrite(path string, b []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := mkdirProjectAll(filepath.Dir(path)); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
@@ -415,7 +462,7 @@ func (m *Manager) Mkdir(name, rel string) error {
 	if rel == "" {
 		return errors.New("directory path is required")
 	}
-	return os.MkdirAll(p, 0700)
+	return mkdirProjectAll(p)
 }
 
 func (m *Manager) RemoveFile(name, rel string) error {
@@ -453,7 +500,7 @@ func (m *Manager) Rename(name, from, to string) error {
 	if old, err := os.ReadFile(src); err == nil {
 		_ = m.snapshotFile(dir, from, "rename", old)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+	if err := mkdirProjectAll(filepath.Dir(dst)); err != nil {
 		return err
 	}
 	return os.Rename(src, dst)
