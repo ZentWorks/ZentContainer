@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ZentContainer API
-  version: 0.6.53
+  version: 0.6.54
   description: REST API for ZentContainer Controller operations. Remote hosts use the same resource paths below a host proxy prefix.
 servers:
   - url: /api/v1
@@ -322,7 +322,7 @@ paths:
     get: {summary: Download a project file, responses: {'200': {description: File}}}
   /projects/{name}/analysis:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
-    get: {summary: Analyze Compose files, services, environment variables/defaults and common missing file references, responses: {'200': {description: OK}}}
+    get: {summary: 'Analyze Compose files, services, environment variables/defaults and missing project-local file references', responses: {'200': {description: OK}}}
   /projects/{name}/status:
     parameters: [{name: name, in: path, required: true, schema: {type: string}}]
     get: {summary: Read Compose runtime status for the project, responses: {'200': {description: OK}}}

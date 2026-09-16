@@ -714,6 +714,156 @@ func parseEnv(text string) (map[string]string, []string) {
 	return vals, dups
 }
 
+func composeLocalProjectReferences(text string) []string {
+	refs := []string{}
+	seen := map[string]bool{}
+	add := func(raw string) {
+		if rel, ok := normalizeComposeProjectReference(raw); ok && !seen[rel] {
+			seen[rel] = true
+			refs = append(refs, rel)
+		}
+	}
+
+	section := ""
+	sectionIndent := -1
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if section != "" && indent <= sectionIndent {
+			section = ""
+			sectionIndent = -1
+		}
+
+		key, value, hasKV := composeYAMLKeyValue(trimmed)
+		if hasKV {
+			switch key {
+			case "env_file":
+				if value != "" {
+					for _, item := range composeInlineList(value) {
+						add(item)
+					}
+				}
+			case "build", "context", "file":
+				if value != "" {
+					add(value)
+				}
+			case "source":
+				if section == "volumes" && isExplicitRelativeProjectPath(value) {
+					add(value)
+				}
+			}
+			if value == "" && (key == "env_file" || key == "volumes") {
+				section, sectionIndent = key, indent
+			}
+		}
+
+		if section == "env_file" && strings.HasPrefix(trimmed, "-") {
+			add(strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
+		}
+		if section == "volumes" && strings.HasPrefix(trimmed, "-") {
+			item := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+			item = trimComposeScalar(item)
+			if isExplicitRelativeProjectPath(item) {
+				// Short bind syntax: ./host/path:/container/path[:mode].
+				if i := strings.Index(item, ":"); i >= 0 {
+					item = item[:i]
+				}
+				add(item)
+			}
+		}
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func composeYAMLKeyValue(trimmed string) (string, string, bool) {
+	if strings.HasPrefix(trimmed, "-") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+	}
+	i := strings.Index(trimmed, ":")
+	if i <= 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(trimmed[:i])
+	if key == "" || strings.ContainsAny(key, " \t{}[]") {
+		return "", "", false
+	}
+	return key, strings.TrimSpace(trimmed[i+1:]), true
+}
+
+func trimComposeScalar(v string) string {
+	v = strings.TrimSpace(v)
+	quote := byte(0)
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '\'', '"':
+			if quote == 0 {
+				quote = v[i]
+			} else if quote == v[i] {
+				quote = 0
+			}
+		case '#':
+			if quote == 0 && (i == 0 || v[i-1] == ' ' || v[i-1] == '\t') {
+				v = strings.TrimSpace(v[:i])
+				i = len(v)
+			}
+		}
+	}
+	if len(v) >= 2 && ((v[0] == '\'' && v[len(v)-1] == '\'') || (v[0] == '"' && v[len(v)-1] == '"')) {
+		v = v[1 : len(v)-1]
+	}
+	return strings.TrimSpace(v)
+}
+
+func composeInlineList(v string) []string {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "[") || !strings.HasSuffix(v, "]") {
+		return []string{v}
+	}
+	body := strings.TrimSpace(v[1 : len(v)-1])
+	if body == "" {
+		return nil
+	}
+	parts := strings.Split(body, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func isExplicitRelativeProjectPath(v string) bool {
+	v = trimComposeScalar(v)
+	return strings.HasPrefix(v, "./") || strings.HasPrefix(v, "../")
+}
+
+func normalizeComposeProjectReference(raw string) (string, bool) {
+	v := trimComposeScalar(raw)
+	if v == "" || v == "." || strings.HasPrefix(v, "{") || strings.HasPrefix(v, "[") || strings.Contains(v, "${") || strings.Contains(v, "://") || (strings.Contains(v, "@") && strings.Contains(v, ":")) {
+		return "", false
+	}
+	// Absolute host paths are outside the project workspace. Registry/image
+	// references are never fed here because only path-bearing Compose keys call
+	// this helper. Parent traversals are intentionally not inspected either.
+	if filepath.IsAbs(v) || strings.HasPrefix(v, "../") {
+		return "", false
+	}
+	v = strings.TrimPrefix(v, "./")
+	if v == "" {
+		return "", false
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(v)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	return clean, true
+}
+
 func (m *Manager) Analyze(name string) (ProjectAnalysis, error) {
 	dir, err := m.path(name)
 	if err != nil {
@@ -817,11 +967,12 @@ func (m *Manager) Analyze(name string) (ProjectAnalysis, error) {
 			}
 		}
 	}
-	// Highlight common local file references without pretending to be a full YAML parser.
-	refs := regexp.MustCompile(`(?:^|[\s\-])(?:\./)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|\.env[A-Za-z0-9_.-]*)`).FindAllStringSubmatch(text, -1)
+	// Only inspect Compose fields that semantically refer to local project files.
+	// A slash by itself is not evidence of a file: image references such as
+	// ghcr.io/org/image, URLs, labels and command arguments must never become
+	// "missing file" findings.
 	seen := map[string]bool{}
-	for _, r := range refs {
-		rel := strings.TrimPrefix(r[1], "./")
+	for _, rel := range composeLocalProjectReferences(text) {
 		if rel == "" || seen[rel] {
 			continue
 		}
